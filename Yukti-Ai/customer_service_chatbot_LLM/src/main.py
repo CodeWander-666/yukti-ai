@@ -1,8 +1,3 @@
-"""
-Yukti AI – Main Application (Ultimate UI Edition)
-Professional interface with file upload, persistent media, and premium styling.
-"""
-
 import os
 import sys
 import time
@@ -41,7 +36,7 @@ logger = logging.getLogger(__name__)
 # ----------------------------------------------------------------------
 st.set_page_config(
     page_title="Yukti AI",
-    page_icon="✨",
+    page_icon="",
     layout="wide",
     initial_sidebar_state="expanded"
 )
@@ -278,11 +273,11 @@ def render_task(task_id):
             if task_info['status'] == 'processing':
                 st.progress(task_info['progress']/100, text=f"{task_info['progress']}%")
             elif task_info['status'] == 'completed':
-                st.success("✅ Completed")
+                st.success(" Completed")
             elif task_info['status'] == 'failed':
-                st.error(f"❌ Failed: {task_info['error']}")
+                st.error(f" Failed: {task_info['error']}")
             else:
-                st.info("⏳ Queued...")
+                st.info(" Queued...")
         with cols[1]:
             if task_info['status'] == 'processing':
                 if st.button("⟳", key=f"refresh_{task_id}"):
@@ -305,7 +300,7 @@ def render_task(task_id):
 # Sidebar – cleaned up
 # ----------------------------------------------------------------------
 with st.sidebar:
-    st.markdown("## 🧠 Brain")
+    st.markdown("##  Brain")
 
     # Model selector – fixed text, no label above (we use heading)
     model_options = get_available_models()
@@ -335,18 +330,18 @@ with st.sidebar:
     st.divider()
 
     # Knowledge Base (simplified)
-    st.markdown("### 📚 Knowledge Base")
-    if st.button("🔄 Update", use_container_width=True):
+    st.markdown("###  Knowledge Base")
+    if st.button(" Update", use_container_width=True):
         rebuild_knowledge_base()
     if st.session_state.knowledge_base_ready:
-        st.markdown("✅ **Active**")
+        st.markdown(" **Active**")
     else:
-        st.markdown("⚠️ **Not built**")
+        st.markdown(" **Not built**")
 
     st.divider()
 
     # Clear Conversation
-    if st.button("🗑️ Clear Chat", use_container_width=True):
+    if st.button(" Clear Chat", use_container_width=True):
         st.session_state.messages = [
             {"role": "assistant", "content": "Hello! I'm Yukti AI. How can I help you today?"}
         ]
@@ -419,7 +414,7 @@ if prompt := st.chat_input("Ask me anything..."):
                         with open(audio_path, "rb") as f:
                             audio_bytes = f.read()
                         st.audio(audio_bytes, format="audio/wav")
-                        st.download_button("📥 Download Audio", data=audio_bytes, file_name="yukti_audio.wav")
+                        st.download_button(" Download Audio", data=audio_bytes, file_name="yukti_audio.wav")
                         full_response = "Audio generated."
                         result = {"type": "sync", "format": "audio"}
                         media.append({"type": "audio", "url": audio_path})
@@ -494,7 +489,7 @@ if prompt := st.chat_input("Ask me anything..."):
 if ZHIPU_AVAILABLE:
     with st.sidebar:
         st.divider()
-        st.markdown("### 📋 Tasks")
+        st.markdown("###  Tasks")
         if st.button("⟳ Refresh Tasks", use_container_width=True):
             st.rerun()
         # Fetch fresh task list

@@ -2,10 +2,9 @@ import os
 import sys
 import time
 import logging
-import tempfile
 from pathlib import Path
 
-# Add project root to path
+# Force project root into path (ensures imports work on Streamlit Cloud)
 PROJECT_ROOT = Path(__file__).parent.parent.parent.parent
 if str(PROJECT_ROOT) not in sys.path:
     sys.path.insert(0, str(PROJECT_ROOT))
@@ -16,6 +15,7 @@ import requests
 from langchain_core.documents import Document
 from langchain_community.vectorstores import FAISS
 
+# Local imports (must be in same directory)
 from langchain_helper import get_embeddings, VECTORDB_PATH, BASE_DIR, create_vector_db
 from think import think
 from model_manager import (
@@ -36,13 +36,13 @@ logger = logging.getLogger(__name__)
 # ----------------------------------------------------------------------
 st.set_page_config(
     page_title="Yukti AI",
-    page_icon="",
+    page_icon="✨",
     layout="wide",
     initial_sidebar_state="expanded"
 )
 
 # ----------------------------------------------------------------------
-# Premium Futuristic CSS with 3D buttons and compact media
+# Premium Futuristic CSS with 3D buttons and neon sticker
 # ----------------------------------------------------------------------
 st.markdown("""
 <style>
@@ -119,6 +119,49 @@ st.markdown("""
     .stProgress > div > div > div {
         background: linear-gradient(90deg, #00f2fe, #ff6a88);
     }
+    /* Neon URL Sticker */
+    .url-wrapper {
+        display: flex;
+        align-items: center;
+        gap: 12px;
+        background: var(--bg-dark);
+        padding: 10px 20px;
+        border-radius: 8px;
+        font-family: 'Inter', sans-serif;
+        margin-bottom: 1rem;
+    }
+    .neon-sticker {
+        font-size: 0.7rem;
+        font-weight: 900;
+        color: #fff;
+        background: #000;
+        padding: 2px 8px;
+        border-radius: 4px;
+        text-transform: uppercase;
+        letter-spacing: 1px;
+        border: 1.5px solid var(--neon-color);
+        box-shadow: 0 0 5px var(--neon-color), inset 0 0 5px var(--neon-color);
+        text-shadow: 0 0 2px #fff, 0 0 8px var(--neon-color);
+        user-select: none;
+        animation: neon-pulse 1.5s infinite alternate;
+    }
+    .url-text {
+        color: #888;
+        text-decoration: none;
+        font-size: 0.9rem;
+        transition: color 0.3s ease;
+    }
+    .url-wrapper:hover .url-text {
+        color: #fff;
+    }
+    @keyframes neon-pulse {
+        from { opacity: 1; }
+        to { opacity: 0.8; box-shadow: 0 0 10px var(--neon-color), inset 0 0 8px var(--neon-color); }
+    }
+    :root {
+        --neon-color: #00ffcc;
+        --bg-dark: #1a1a1a;
+    }
     /* Hide Streamlit branding */
     #MainMenu {visibility: hidden;}
     footer {visibility: hidden;}
@@ -166,6 +209,7 @@ SOURCES = [{
 # Helper functions
 # ----------------------------------------------------------------------
 def load_all_documents():
+    """Load documents from all sources with robust error handling."""
     docs = []
     for src in SOURCES:
         if src["type"] != "csv":
@@ -223,6 +267,7 @@ def load_all_documents():
     return docs
 
 def rebuild_knowledge_base():
+    """Rebuild FAISS index from all sources."""
     with st.spinner("Loading documents..."):
         docs = load_all_documents()
         if docs is None:
@@ -245,6 +290,7 @@ def rebuild_knowledge_base():
             return False
 
 def stream_response(placeholder, full_text, delay=0.02):
+    """Simulate letter‑by‑letter streaming."""
     if not full_text or not isinstance(full_text, str):
         placeholder.markdown("")
         return
@@ -273,11 +319,11 @@ def render_task(task_id):
             if task_info['status'] == 'processing':
                 st.progress(task_info['progress']/100, text=f"{task_info['progress']}%")
             elif task_info['status'] == 'completed':
-                st.success(" Completed")
+                st.success("✅ Completed")
             elif task_info['status'] == 'failed':
-                st.error(f" Failed: {task_info['error']}")
+                st.error(f"❌ Failed: {task_info['error']}")
             else:
-                st.info(" Queued...")
+                st.info("⏳ Queued...")
         with cols[1]:
             if task_info['status'] == 'processing':
                 if st.button("⟳", key=f"refresh_{task_id}"):
@@ -297,22 +343,30 @@ def render_task(task_id):
                                        file_name=f"yukti_image_{task_id[:8]}.png")
 
 # ----------------------------------------------------------------------
-# Sidebar – cleaned up
+# Sidebar – cleaned up and professional
 # ----------------------------------------------------------------------
 with st.sidebar:
-    st.markdown("##  Brain")
+    # Neon URL Sticker
+    st.markdown("""
+    <div class="url-wrapper">
+      <span class="neon-sticker">YuktiAI</span>
+      <a href="https://yukti.ai" target="_blank" class="url-text">https://yukti.ai</a>
+    </div>
+    """, unsafe_allow_html=True)
+    st.divider()
 
-    # Model selector – fixed text, no label above (we use heading)
+    st.markdown("## 🧠 Brain")
+
+    # Model selector – with non‑empty label hidden
     model_options = get_available_models()
-    # Create display names with description baked in
     display_names = [f"{m} – {MODELS[m]['description']}" for m in model_options]
     selected_display = st.selectbox(
-        "",  # empty label
+        label="Select model",  # non‑empty label, but hidden visually
         options=display_names,
         index=0,
-        key="model_display"
+        key="model_display",
+        label_visibility="collapsed"
     )
-    # Extract actual model key from display name
     selected_model = model_options[display_names.index(selected_display)]
     st.session_state.selected_model = selected_model
 
@@ -330,22 +384,49 @@ with st.sidebar:
     st.divider()
 
     # Knowledge Base (simplified)
-    st.markdown("###  Knowledge Base")
-    if st.button(" Update", use_container_width=True):
+    st.markdown("### 📚 Knowledge Base")
+    if st.button("🔄 Update", use_container_width=True):
         rebuild_knowledge_base()
     if st.session_state.knowledge_base_ready:
-        st.markdown(" **Active**")
+        st.markdown("✅ **Active**")
     else:
-        st.markdown(" **Not built**")
+        st.markdown("⚠️ **Not built**")
 
     st.divider()
 
+    # Active tasks (only if Zhipu async available)
+    if ZHIPU_AVAILABLE:
+        st.markdown("### 📋 Tasks")
+        if st.button("⟳ Refresh Tasks", use_container_width=True):
+            st.rerun()
+        try:
+            active_tasks = get_active_tasks()
+            for task_id, variant, status, progress in active_tasks:
+                if task_id not in st.session_state.tasks:
+                    st.session_state.tasks[task_id] = {
+                        "variant": variant,
+                        "status": status,
+                        "progress": progress,
+                        "result_url": None,
+                        "error": None
+                    }
+                else:
+                    st.session_state.tasks[task_id].update({
+                        "status": status,
+                        "progress": progress
+                    })
+        except Exception as e:
+            st.warning(f"Could not fetch tasks: {e}")
+
+        for task_id in list(st.session_state.tasks.keys()):
+            render_task(task_id)
+        st.divider()
+
     # Clear Conversation
-    if st.button(" Clear Chat", use_container_width=True):
+    if st.button("🗑️ Clear Chat", use_container_width=True):
         st.session_state.messages = [
             {"role": "assistant", "content": "Hello! I'm Yukti AI. How can I help you today?"}
         ]
-        # Optionally clear uploaded files? We'll keep them in session.
         st.rerun()
 
 # ----------------------------------------------------------------------
@@ -387,6 +468,7 @@ if prompt := st.chat_input("Ask me anything..."):
             extra_kwargs = {}
             if uploaded_file is not None:
                 # Save uploaded file temporarily
+                import tempfile
                 with tempfile.NamedTemporaryFile(delete=False, suffix=Path(uploaded_file.name).suffix) as tmp:
                     tmp.write(uploaded_file.getvalue())
                     extra_kwargs["image_url"] = tmp.name  # or file path, adjust based on API
@@ -414,7 +496,7 @@ if prompt := st.chat_input("Ask me anything..."):
                         with open(audio_path, "rb") as f:
                             audio_bytes = f.read()
                         st.audio(audio_bytes, format="audio/wav")
-                        st.download_button(" Download Audio", data=audio_bytes, file_name="yukti_audio.wav")
+                        st.download_button("📥 Download Audio", data=audio_bytes, file_name="yukti_audio.wav")
                         full_response = "Audio generated."
                         result = {"type": "sync", "format": "audio"}
                         media.append({"type": "audio", "url": audio_path})
@@ -452,7 +534,6 @@ if prompt := st.chat_input("Ask me anything..."):
             # Handle result from think (if any)
             if result and result.get("type") == "async":
                 task_id = result.get("task_id")
-                # Show a mini progress indicator in chat (optional)
                 st.info(f"Task {task_id} submitted. Check sidebar for progress.")
             elif result and result.get("type") == "sync" and result.get("answer"):
                 answer = result.get("answer", "")
@@ -482,37 +563,3 @@ if prompt := st.chat_input("Ask me anything..."):
         st.session_state.messages.append({"role": "assistant", "content": full_response})
     elif full_response:
         st.session_state.messages.append({"role": "assistant", "content": full_response})
-
-# ----------------------------------------------------------------------
-# Periodic task refresh (optional, but we can add a button in sidebar)
-# ----------------------------------------------------------------------
-if ZHIPU_AVAILABLE:
-    with st.sidebar:
-        st.divider()
-        st.markdown("###  Tasks")
-        if st.button("⟳ Refresh Tasks", use_container_width=True):
-            st.rerun()
-        # Fetch fresh task list
-        try:
-            active_tasks = get_active_tasks()
-            # Update session state tasks
-            for task_id, variant, status, progress in active_tasks:
-                if task_id not in st.session_state.tasks:
-                    st.session_state.tasks[task_id] = {
-                        "variant": variant,
-                        "status": status,
-                        "progress": progress,
-                        "result_url": None,
-                        "error": None
-                    }
-                else:
-                    st.session_state.tasks[task_id].update({
-                        "status": status,
-                        "progress": progress
-                    })
-        except Exception as e:
-            st.warning(f"Could not fetch tasks: {e}")
-
-        # Render active tasks in sidebar
-        for task_id in list(st.session_state.tasks.keys()):
-            render_task(task_id)

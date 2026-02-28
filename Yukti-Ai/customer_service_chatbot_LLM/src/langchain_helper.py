@@ -2,13 +2,14 @@ from langchain_community.vectorstores import FAISS
 from langchain_community.llms import GooglePalm
 from langchain_community.document_loaders import CSVLoader
 from langchain_community.embeddings import HuggingFaceInstructEmbeddings
-from langchain.prompts import PromptTemplate
+from langchain_core.prompts import PromptTemplate   # <-- use langchain_core
 from langchain.chains import RetrievalQA
 import os
 
 from dotenv import load_dotenv
 
-load_dotenv()  # take environment variables from .env (especially google api key)
+load_dotenv()
+
 
 # Create Google Palm LLM model
 llm = GooglePalm(google_api_key=os.environ["GOOGLE_API_KEY"], temperature=0.1)

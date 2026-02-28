@@ -6,8 +6,8 @@ from langchain_community.document_loaders import CSVLoader
 from langchain_community.embeddings import HuggingFaceInstructEmbeddings
 from langchain_core.prompts import PromptTemplate
 from langchain_google_genai import GoogleGenerativeAI
-from langchain.chains import create_retrieval_chain
-from langchain.chains.combine_documents import create_stuff_documents_chain
+from langchain_classic.chains import create_retrieval_chain
+from langchain_classic.chains.combine_documents import create_stuff_documents_chain
 
 # Take environment variables from .env (especially GOOGLE_API_KEY)
 load_dotenv()  

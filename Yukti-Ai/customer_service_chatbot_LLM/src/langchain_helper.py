@@ -34,7 +34,7 @@ def create_vector_db():
 
 def get_qa_chain():
     if not os.path.exists(VECTORDB_PATH):
-        raise FileNotFoundError("Knowledge base not found. Click 'Create Knowledgebase' first.")
+        raise FileNotFoundError("Knowledge base not found. Click 'Update Knowledge Base' first.")
     embeddings = get_embeddings()
     vectordb = FAISS.load_local(VECTORDB_PATH, embeddings, allow_dangerous_deserialization=True)
     retriever = vectordb.as_retriever(score_threshold=0.7)

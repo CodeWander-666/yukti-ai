@@ -36,7 +36,7 @@ logger = logging.getLogger(__name__)
 # ----------------------------------------------------------------------
 st.set_page_config(
     page_title="Yukti AI",
-    page_icon="✨",
+    page_icon="",
     layout="wide",
     initial_sidebar_state="expanded"
 )
@@ -172,7 +172,7 @@ st.markdown("""
 # Title and subtitle
 # ----------------------------------------------------------------------
 st.title("Yukti AI")
-st.caption("Your Futuristic Cognitive Companion")
+st.caption("Future of Indian Chatbot ")
 
 # ----------------------------------------------------------------------
 # Session state initialization
@@ -350,12 +350,12 @@ with st.sidebar:
     st.markdown("""
     <div class="url-wrapper">
       <span class="neon-sticker">YuktiAI</span>
-      <a href="https://yukti.ai" target="_blank" class="url-text">https://yukti.ai</a>
+      <a href="" target="_blank" class="url-text"</a>
     </div>
     """, unsafe_allow_html=True)
     st.divider()
 
-    st.markdown("## 🧠 Brain")
+    st.markdown("##  Brain")
 
     # Model selector – with non‑empty label hidden
     model_options = get_available_models()
@@ -384,19 +384,19 @@ with st.sidebar:
     st.divider()
 
     # Knowledge Base (simplified)
-    st.markdown("### 📚 Knowledge Base")
-    if st.button("🔄 Update", use_container_width=True):
+    st.markdown("###  Knowledge Base")
+    if st.button(" Update", use_container_width=True):
         rebuild_knowledge_base()
     if st.session_state.knowledge_base_ready:
-        st.markdown("✅ **Active**")
+        st.markdown(" **Active**")
     else:
-        st.markdown("⚠️ **Not built**")
+        st.markdown(" **Not built**")
 
     st.divider()
 
     # Active tasks (only if Zhipu async available)
     if ZHIPU_AVAILABLE:
-        st.markdown("### 📋 Tasks")
+        st.markdown("###  Tasks")
         if st.button("⟳ Refresh Tasks", use_container_width=True):
             st.rerun()
         try:

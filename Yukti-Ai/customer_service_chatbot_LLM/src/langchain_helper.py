@@ -17,35 +17,43 @@ BASE_DIR = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
 DATASET_PATH = os.path.join(BASE_DIR, "dataset", "dataset.csv")
 VECTORDB_PATH = os.path.join(BASE_DIR, "faiss_index")
 
-# Faster models list (gemini-pro is most reliable)
+# Model list for 2026 – Gemini 1.5 is retired, use 2.5/3 series
 GEMINI_MODELS = [
-    "gemini-1.5-flash",
-    "gemini-1.5-pro",
-    "gemini-pro",
+    "gemini-2.5-flash",        # Fast, stable, recommended for RAG
+    "gemini-2.5-pro",
+    "gemini-3-flash",
+    "gemini-3.1-pro",
 ]
 
 def get_llm():
+    """Return a working Gemini LLM with fallback models."""
     api_key = os.environ.get("GOOGLE_API_KEY")
     if not api_key:
-        raise ValueError("GOOGLE_API_KEY missing.")
+        raise ValueError("GOOGLE_API_KEY missing. Set it in .env or Streamlit secrets.")
+    
     last_error = None
     for model in GEMINI_MODELS:
         try:
             logger.info(f"Trying model: {model}")
-          llm = GoogleGenerativeAI(
-            model="gemini-2.5-flash", 
-            google_api_key=os.environ["GOOGLE_API_KEY"], 
-            temperature=0.1
-        )
-            
+            llm = GoogleGenerativeAI(
+                model=model,
+                google_api_key=api_key,
+                temperature=0.1,
+                max_retries=2,
+                request_timeout=30
+            )
+            # Quick test call (optional, remove if it slows startup)
+            # llm.invoke("test")
+            logger.info(f"✅ Using model: {model}")
             return llm
         except Exception as e:
             last_error = e
+            logger.warning(f"Model {model} failed: {e}")
             continue
     raise RuntimeError(f"All Gemini models failed. Last error: {last_error}")
 
-# Faster embedding model
 def get_embeddings():
+    """Fast embedding model."""
     try:
         return HuggingFaceInstructEmbeddings(
             model_name="sentence-transformers/all-MiniLM-L6-v2",
@@ -55,6 +63,7 @@ def get_embeddings():
         raise RuntimeError(f"Failed to load embedding model: {e}")
 
 def create_vector_db():
+    """Build FAISS index from CSV."""
     if not os.path.exists(DATASET_PATH):
         raise FileNotFoundError(f"Dataset not found at {DATASET_PATH}")
     logger.info(f"Loading CSV from {DATASET_PATH}")
@@ -67,11 +76,12 @@ def create_vector_db():
     logger.info(f"Index saved to {VECTORDB_PATH}")
 
 def get_qa_chain():
+    """Load index and return QA chain."""
     if not os.path.exists(VECTORDB_PATH):
         raise FileNotFoundError("Knowledge base not found. Click 'Update Knowledge Base' first.")
     embeddings = get_embeddings()
     vectordb = FAISS.load_local(VECTORDB_PATH, embeddings, allow_dangerous_deserialization=True)
-    retriever = vectordb.as_retriever(search_kwargs={"k": 3})  # Faster: fewer docs
+    retriever = vectordb.as_retriever(search_kwargs={"k": 3})  # Retrieve top 3 docs
     prompt = PromptTemplate(
         template="""Given the context below, answer the question.
 If the answer is not in the context, say "I don't know."

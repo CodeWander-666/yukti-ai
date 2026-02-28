@@ -16,21 +16,13 @@ SOURCES = [
         "columns": ["prompt", "response"],
         "content_template": "Q: {prompt}\nA: {response}"
     },
-    # Add more sources as needed, e.g.:
-    # {
-    #     "type": "csv",
-    #     "path": os.path.join(BASE_DIR, "dataset", "faq.csv"),
-    #     "name": "FAQ",
-    #     "columns": ["prompt", "response"],
-    #     "content_template": "Q: {prompt}\nA: {response}"
-    # },
+    # Add more sources as needed
 ]
 
 # ----------------------------------------------------------------------
 # Helper to load documents from all sources
 # ----------------------------------------------------------------------
 def load_all_documents():
-    """Fetch documents from all configured sources."""
     docs = []
     for src in SOURCES:
         if src["type"] == "csv":
@@ -52,7 +44,6 @@ def load_all_documents():
                     st.error(f"Could not read {path} with any common encoding.")
                     return None
 
-                # Check required columns
                 for col in src["columns"]:
                     if col not in df.columns:
                         st.error(f"Column '{col}' missing in {path}")
@@ -67,14 +58,12 @@ def load_all_documents():
             except Exception as e:
                 st.error(f"Error reading {path}: {e}")
                 return None
-        # Add other source types here if needed
     return docs
 
 # ----------------------------------------------------------------------
 # Rebuild the vector database from all sources
 # ----------------------------------------------------------------------
 def rebuild_knowledge_base():
-    """Rebuild FAISS index from all sources."""
     with st.spinner("Loading documents from sources..."):
         docs = load_all_documents()
         if docs is None:

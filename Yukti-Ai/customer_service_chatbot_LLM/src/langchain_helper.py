@@ -6,7 +6,6 @@ from langchain_community.document_loaders import CSVLoader
 from langchain_community.embeddings import HuggingFaceInstructEmbeddings
 from langchain_core.prompts import PromptTemplate
 from langchain_google_genai import GoogleGenerativeAI
-# Use classic chains – matches your installed langchain-classic
 from langchain_classic.chains import create_retrieval_chain
 from langchain_classic.chains.combine_documents import create_stuff_documents_chain
 
@@ -16,7 +15,9 @@ load_dotenv()
 # Path configuration (absolute paths for Streamlit Cloud)
 # ----------------------------------------------------------------------
 BASE_DIR = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
-DATASET_PATH = os.path.join(BASE_DIR, "dataset.csv")
+
+# The CSV file is inside the "dataset" folder
+DATASET_PATH = os.path.join(BASE_DIR, "dataset", "dataset.csv")
 VECTORDB_PATH = os.path.join(BASE_DIR, "faiss_index")
 
 # ----------------------------------------------------------------------
@@ -56,7 +57,7 @@ def create_vector_db():
     if not os.path.exists(DATASET_PATH):
         raise FileNotFoundError(
             f"Dataset file not found at {DATASET_PATH}. "
-            "Please ensure 'dataset.csv' is in the correct location."
+            "Please ensure 'dataset.csv' is inside the 'dataset/' folder."
         )
 
     # Load CSV data

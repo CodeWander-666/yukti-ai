@@ -6,11 +6,10 @@ from langchain_community.document_loaders import CSVLoader
 from langchain_community.embeddings import HuggingFaceInstructEmbeddings
 from langchain_core.prompts import PromptTemplate
 from langchain_google_genai import GoogleGenerativeAI
-# Use the classic package for chains (matches your installed langchain-classic)
+# Use classic chains – matches your installed langchain-classic
 from langchain_classic.chains import create_retrieval_chain
 from langchain_classic.chains.combine_documents import create_stuff_documents_chain
 
-# Load environment variables
 load_dotenv()
 
 # ----------------------------------------------------------------------
@@ -21,7 +20,7 @@ DATASET_PATH = os.path.join(BASE_DIR, "dataset.csv")
 VECTORDB_PATH = os.path.join(BASE_DIR, "faiss_index")
 
 # ----------------------------------------------------------------------
-# Global resources (initialised once)
+# Resource initialisation with error handling
 # ----------------------------------------------------------------------
 def get_llm():
     """Create and return the Google Gemini LLM."""
@@ -136,14 +135,3 @@ def get_qa_chain():
         raise RuntimeError(f"Failed to build retrieval chain: {e}")
 
     return retrieval_chain
-
-# ----------------------------------------------------------------------
-# For standalone testing
-# ----------------------------------------------------------------------
-if __name__ == "__main__":
-    # Uncomment the next line to rebuild the index
-    # create_vector_db()
-
-    chain = get_qa_chain()
-    response = chain.invoke({"input": "hello?"})
-    print(response["answer"])

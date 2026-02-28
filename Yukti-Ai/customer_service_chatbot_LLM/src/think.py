@@ -1,3 +1,8 @@
+"""
+Yukti AI – Advanced Thinking Engine (The Brain)
+Human‑like reasoning with emotional awareness, self‑questioning, memory, and structured output.
+"""
+
 import logging
 import time
 import hashlib

@@ -199,16 +199,3 @@ def get_document_count() -> Optional[int]:
     if vectordb:
         return vectordb.index.ntotal
     return None
-
-# ----------------------------------------------------------------------
-# For standalone testing (optional)
-# ----------------------------------------------------------------------
-if __name__ == "__main__":
-    print("Testing knowledge base status...")
-    if check_kb_status():
-        print(f"Index exists at {VECTORDB_PATH}")
-        count = get_document_count()
-        if count is not None:
-            print(f"Document count: {count}")
-    else:
-        print("No index found. You can create one by calling create_vector_db()")

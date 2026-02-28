@@ -1,97 +1,78 @@
+"""
+Yukti AI – Model Manager with dynamic Zhipu detection and Gemini fallback.
+"""
+
 import logging
-import time
-from typing import List, Dict, Any
-from model_manager import load_model, get_model_config
-from langchain_helper import retrieve_documents
+import sys
+from pathlib import Path
 
 logger = logging.getLogger(__name__)
 
-def think(user_query: str, conversation_history: List[Dict[str, str]], model_key: str) -> Dict[str, Any]:
-    config = get_model_config(model_key)
-    if not config:
-        raise ValueError(f"Unknown model: {model_key}")
+# Add project root to path
+PROJECT_ROOT = Path(__file__).parent.parent.parent.parent
+if str(PROJECT_ROOT) not in sys.path:
+    sys.path.insert(0, str(PROJECT_ROOT))
 
-    if config["type"] == "async":
-        llm = load_model(model_key)
-        task_id = llm.invoke(user_query)
-        return {
-            "type": "async",
-            "task_id": task_id,
-            "variant": model_key,
-            "model": config["model"]
-        }
-    else:
-        start_time = time.time()
-        llm = load_model(model_key)
-        try:
-            docs = retrieve_documents(user_query, k=3)
-        except FileNotFoundError:
-            return {
-                "type": "sync",
-                "answer": "The knowledge base is not ready. Please update it first.",
-                "monologue": "",
-                "sources": [],
-                "thinking_time": 0.0
-            }
-        except Exception as e:
-            logger.exception("Retrieval error")
-            return {
-                "type": "sync",
-                "answer": f"Sorry, I encountered an error: {e}",
-                "monologue": "",
-                "sources": [],
-                "thinking_time": 0.0
-            }
-
-        context = "\n\n".join([doc.page_content for doc in docs])
-        history_str = ""
-        for turn in conversation_history[-5:]:
-            role = "User" if turn["role"] == "user" else "Yukti"
-            history_str += f"{role}: {turn['content']}\n"
-
-        reasoning_prompt = f"""You are Yukti AI, a thoughtful assistant. Use the context and conversation to answer.
-
-Context:
-{context}
-
-Conversation:
-{history_str}
-
-User: {user_query}
-
-Think step by step, then write your answer. Format as:
-
-MONOLOGUE:
-(Your reasoning)
-
-ANSWER:
-(Your final answer)
-"""
-        try:
-            full_response = llm.invoke(reasoning_prompt)
-        except Exception as e:
-            logger.exception("LLM invocation failed")
-            return {
-                "type": "sync",
-                "answer": f"Sorry, I couldn't generate an answer: {e}",
-                "monologue": "",
-                "sources": docs,
-                "thinking_time": time.time() - start_time
-            }
-
-        monologue = ""
-        answer = full_response
-        if "MONOLOGUE:" in full_response and "ANSWER:" in full_response:
-            parts = full_response.split("MONOLOGUE:", 1)[1]
-            if "ANSWER:" in parts:
-                monologue, answer = parts.split("ANSWER:", 1)
-                monologue = monologue.strip()
-                answer = answer.strip()
-
-        return {
+# Attempt to import Zhipu, fallback to Gemini
+try:
+    from LLM.zhipu import ZhipuSyncClient, TaskQueue, MODELS, get_model_config
+    logger.info("Zhipu models loaded successfully.")
+    ZHIPU_AVAILABLE = True
+except ImportError:
+    logger.warning("Zhipu not available, using Gemini fallback.")
+    from langchain_google_genai import ChatGoogleGenerativeAI
+    MODELS = {
+        "Gemini 3 Flash": {
+            "model": "gemini-3-flash",
             "type": "sync",
-            "answer": answer,
-            "monologue": monologue,
-            "sources": docs,
-            "thinking_time": time.time() - start_time
+            "description": "Google Gemini fallback (fast & free tier)",
         }
+    }
+    def get_model_config(key):
+        return MODELS.get(key)
+
+    # Dummy Zhipu classes for compatibility
+    class ZhipuSyncClient:
+        def chat(self, model, prompt, **kwargs):
+            llm = ChatGoogleGenerativeAI(model=model, temperature=kwargs.get("temperature", 0.1))
+            return llm.invoke(prompt)
+    class TaskQueue:
+        def __init__(self, db_path=None):
+            self.conn = None
+        def submit_async(self, *args, **kwargs):
+            raise RuntimeError("Async tasks require Zhipu, which is not available.")
+    ZHIPU_AVAILABLE = False
+
+# Global instances
+_task_queue = TaskQueue(db_path=Path(__file__).parent.parent / "yukti_tasks.db")
+_sync_client = ZhipuSyncClient()
+
+class YuktiModel:
+    def __init__(self, model_key: str):
+        self.config = get_model_config(model_key)
+        if not self.config:
+            raise ValueError(f"Unknown model key: {model_key}")
+        self.model_key = model_key
+        self.model_name = self.config["model"]
+
+    def invoke(self, prompt: str, **kwargs):
+        if self.config["type"] == "sync":
+            return _sync_client.chat(
+                model=self.model_name,
+                prompt=prompt,
+                temperature=kwargs.get("temperature", 0.1)
+            )
+        else:
+            if not ZHIPU_AVAILABLE:
+                raise RuntimeError("Async tasks require Zhipu, which is not available.")
+            return _task_queue.submit_async(
+                variant=self.model_key,
+                model=self.model_name,
+                prompt=prompt
+            )
+
+def load_model(model_key: str):
+    return YuktiModel(model_key)
+
+def get_available_models():
+    return list(MODELS.keys())

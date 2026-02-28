@@ -1,7 +1,8 @@
-langchain
-python-dotenv
 streamlit
-tiktoken
+langchain
+langchain-community
 faiss-cpu
-protobuf
-sentence-transformer
+sentence-transformers
+google-generativeai
+python-dotenv
+pandas

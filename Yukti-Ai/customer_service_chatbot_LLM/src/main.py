@@ -1,7 +1,7 @@
 import os
 import streamlit as st
 import pandas as pd
-from langchain.schema import Document
+from langchain_core.documents import Document
 from langchain_helper import get_qa_chain, get_embeddings, VECTORDB_PATH, BASE_DIR
 from langchain_community.vectorstores import FAISS
 

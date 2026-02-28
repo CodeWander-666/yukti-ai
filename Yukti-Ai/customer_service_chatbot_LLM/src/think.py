@@ -84,9 +84,7 @@ def retrieve_diverse(query: str, k: int = 3) -> List[Document]:
             except Exception as e:
                 logger.error(f"Retrieval failed for a variant: {e}")
 
-    # Sort by relevance? Not easy without scores; we'll rely on the fact that
-    # similarity_search returns sorted. We'll just keep the order they came.
-    # Limit to top k*3 to avoid too many.
+    # Sort by relevance? Not without scores; we'll keep order as they came.
     result = all_docs[:k*3]
     set_cached_retrieval(query, result)
     return result

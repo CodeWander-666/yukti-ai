@@ -13,5 +13,5 @@ google-generativeai>=0.8.0
 
 
 requests
-zhipuai>=2.1.5
-zai-sdk>=0.2.2
+zhipuai
+zai-sdk

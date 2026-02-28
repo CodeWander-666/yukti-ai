@@ -6,8 +6,9 @@ from langchain_community.document_loaders import CSVLoader
 from langchain_community.embeddings import HuggingFaceInstructEmbeddings
 from langchain_core.prompts import PromptTemplate
 from langchain_google_genai import GoogleGenerativeAI
-from langchain.chains import create_retrieval_chain
-from langchain.chains.combine_documents import create_stuff_documents_chain
+# Use the classic package for chains (matches your installed langchain-classic)
+from langchain_classic.chains import create_retrieval_chain
+from langchain_classic.chains.combine_documents import create_stuff_documents_chain
 
 # Load environment variables
 load_dotenv()
@@ -127,7 +128,7 @@ def get_qa_chain():
     # Create LLM
     llm = get_llm()
 
-    # Build chains
+    # Build chains using classic imports
     try:
         combine_docs_chain = create_stuff_documents_chain(llm, PROMPT)
         retrieval_chain = create_retrieval_chain(retriever, combine_docs_chain)

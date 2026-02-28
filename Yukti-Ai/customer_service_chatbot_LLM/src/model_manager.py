@@ -4,15 +4,8 @@ Loads models from LLM.zhipu package.
 """
 
 import logging
-import sys
+from LLM.zhipu import ZhipuSyncClient, TaskQueue, MODELS, get_model_config
 from pathlib import Path
-
-# Add LLM package to path (if not already)
-LLM_PATH = Path(__file__).parent.parent.parent / "LLM"
-if str(LLM_PATH) not in sys.path:
-    sys.path.insert(0, str(LLM_PATH))
-
-from zhipu import ZhipuSyncClient, TaskQueue, MODELS, get_model_config
 
 logger = logging.getLogger(__name__)
 

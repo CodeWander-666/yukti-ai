@@ -1,23 +1,23 @@
-from langchain_community.vectorstores import FAISS
-from langchain_community.llms import GooglePalm
-from langchain_community.document_loaders import CSVLoader
-from langchain_community.embeddings import HuggingFaceInstructEmbeddings
-from langchain_core.prompts import PromptTemplate   # ← only this line changed
+from langchain.vectorstores import FAISS
+from langchain.llms import GooglePalm
+from langchain.document_loaders.csv_loader import CSVLoader
+from langchain.embeddings import HuggingFaceInstructEmbeddings
+from langchain.prompts import PromptTemplate
 from langchain.chains import RetrievalQA
 import os
 
 from dotenv import load_dotenv
 
-load_dotenv()  # take environment variables from .env (especially google api key)
+load_dotenv()  # take environment variables from .env (especially openai api key)
 
 # Create Google Palm LLM model
 llm = GooglePalm(google_api_key=os.environ["GOOGLE_API_KEY"], temperature=0.1)
-
-# Initialize instructor embeddings using the Hugging Face model
+# # Initialize instructor embeddings using the Hugging Face model
 instructor_embeddings = HuggingFaceInstructEmbeddings(
     model_name="hkunlp/instructor-large"
 )
 vectordb_file_path = "faiss_index"
+
 
 def create_vector_db():
     # Load data from FAQ sheet
@@ -29,6 +29,7 @@ def create_vector_db():
 
     # Save vector database locally
     vectordb.save_local(vectordb_file_path)
+
 
 def get_qa_chain():
     # Load the vector database from the local folder
@@ -59,6 +60,7 @@ def get_qa_chain():
     )
 
     return chain
+
 
 if __name__ == "__main__":
     create_vector_db()

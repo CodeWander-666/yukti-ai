@@ -23,6 +23,7 @@ SOURCES = [
 # Helper to load documents from all sources
 # ----------------------------------------------------------------------
 def load_all_documents():
+    """Fetch documents from all configured sources (handles any encoding)."""
     docs = []
     for src in SOURCES:
         if src["type"] == "csv":
@@ -31,35 +32,56 @@ def load_all_documents():
                 st.warning(f"Source file not found: {path}")
                 continue
             try:
-                # Try multiple encodings
-                encodings = ['utf-8', 'latin-1', 'cp1252', 'iso-8859-1']
-                df = None
-                for enc in encodings:
-                    try:
-                        df = pd.read_csv(path, encoding=enc, on_bad_lines='skip')
-                        break
-                    except UnicodeDecodeError:
-                        continue
-                if df is None:
-                    st.error(f"Could not read {path} with any common encoding.")
+                # Read file in binary mode, decode with replacement
+                with open(path, 'rb') as f:
+                    raw = f.read()
+                # Decode with 'replace' to handle any invalid bytes
+                content = raw.decode('utf-8', errors='replace')
+                # Split lines and parse CSV manually
+                lines = content.splitlines()
+                if not lines:
+                    st.warning(f"Empty file: {path}")
+                    continue
+                header = lines[0].split(',')
+                # Find indices of required columns
+                try:
+                    prompt_idx = header.index('prompt')
+                    response_idx = header.index('response')
+                except ValueError:
+                    st.error(f"CSV must have 'prompt' and 'response' columns. Found: {header}")
                     return None
 
-                for col in src["columns"]:
-                    if col not in df.columns:
-                        st.error(f"Column '{col}' missing in {path}")
-                        return None
-                for idx, row in df.iterrows():
-                    content = src["content_template"].format(**{col: row[col] for col in src["columns"]})
-                    docs.append(Document(
-                        page_content=content,
-                        metadata={"source": path, "row": idx}
-                    ))
-                st.info(f"Loaded {len(df)} rows from {src['name']}")
+                for i, line in enumerate(lines[1:], start=2):
+                    if not line.strip():
+                        continue
+                    # Simple CSV parsing (handles quoted fields with commas)
+                    parts = []
+                    in_quote = False
+                    current = []
+                    for ch in line:
+                        if ch == '"' and not in_quote:
+                            in_quote = True
+                        elif ch == '"' and in_quote:
+                            in_quote = False
+                        elif ch == ',' and not in_quote:
+                            parts.append(''.join(current).strip())
+                            current = []
+                        else:
+                            current.append(ch)
+                    parts.append(''.join(current).strip())
+                    if len(parts) > max(prompt_idx, response_idx):
+                        prompt = parts[prompt_idx].strip('"')
+                        response = parts[response_idx].strip('"')
+                        content = src["content_template"].format(prompt=prompt, response=response)
+                        docs.append(Document(
+                            page_content=content,
+                            metadata={"source": path, "row": i}
+                        ))
+                st.info(f"Loaded {len(docs)} rows from {src['name']}")
             except Exception as e:
                 st.error(f"Error reading {path}: {e}")
                 return None
     return docs
-
 # ----------------------------------------------------------------------
 # Rebuild the vector database from all sources
 # ----------------------------------------------------------------------

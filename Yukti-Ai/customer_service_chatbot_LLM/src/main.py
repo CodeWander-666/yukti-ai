@@ -1,28 +1,49 @@
+"""
+Yukti AI – Main Application
+Ultra‑robust import handling with fallbacks and debug info.
+"""
+
 import os
 import sys
 import time
 from pathlib import Path
 
-# Force project root into path FIRST
-project_root = Path(__file__).parent.parent.parent.parent  # yukti-ai/
-if str(project_root) not in sys.path:
-    sys.path.insert(0, str(project_root))
+# ---------- Force project root into path ----------
+PROJECT_ROOT = Path(__file__).parent.parent.parent.parent  # /mount/src/yukti-ai/
+if str(PROJECT_ROOT) not in sys.path:
+    sys.path.insert(0, str(PROJECT_ROOT))
 
 import streamlit as st
 import pandas as pd
 from langchain_core.documents import Document
 from langchain_community.vectorstores import FAISS
 
-# Local imports (now safe because path is set)
+# ---------- Conditional import of Zhipu TaskQueue ----------
+try:
+    from LLM.zhipu.queue_manager import TaskQueue
+    ZHIPU_AVAILABLE = True
+    st.sidebar.success("✅ Zhipu async tasks loaded")
+except ImportError as e:
+    # If import fails, create a dummy TaskQueue that does nothing
+    class TaskQueue:
+        def __init__(self, db_path=None):
+            self.conn = None
+        def get_active_tasks(self):
+            return []
+        def submit_async(self, *args, **kwargs):
+            raise RuntimeError("Async tasks not available (Zhipu import failed)")
+    ZHIPU_AVAILABLE = False
+    st.sidebar.warning(f"⚠️ Zhipu import failed: {e}. Async tasks disabled.")
+
+# ---------- Local imports (safe after path set) ----------
 from langchain_helper import get_embeddings, VECTORDB_PATH, BASE_DIR, create_vector_db
 from think import think
 from model_manager import get_available_models, MODELS
-from LLM.zhipu.queue_manager import TaskQueue
 
-# Page config
+# ---------- Page config ----------
 st.set_page_config(page_title="Yukti AI", page_icon="✨", layout="wide")
 
-# Custom CSS
+# Custom CSS (same as before)
 st.markdown("""
 <style>
     .stChatMessage { border-radius: 12px; padding: 1rem; }
@@ -38,7 +59,7 @@ st.markdown("""
 st.title("Yukti AI")
 st.caption("Your Intelligent Assistant – Powered by Zhipu GLM & Gemini")
 
-# Session state
+# ---------- Session state ----------
 if "messages" not in st.session_state:
     st.session_state.messages = [{"role": "assistant", "content": "Hello! I'm Yukti AI. How can I help you today?"}]
 if "knowledge_base_ready" not in st.session_state:
@@ -46,7 +67,7 @@ if "knowledge_base_ready" not in st.session_state:
 if "show_thinking" not in st.session_state:
     st.session_state.show_thinking = True
 
-# Data sources
+# ---------- Data sources ----------
 SOURCES = [{
     "type": "csv",
     "path": os.path.join(BASE_DIR, "dataset", "dataset.csv"),
@@ -117,7 +138,7 @@ def stream_response(placeholder, full_text, delay=0.02):
         time.sleep(delay)
     placeholder.markdown(current)
 
-# Sidebar
+# ---------- Sidebar ----------
 with st.sidebar:
     st.header("Knowledge Base")
     if st.button("Update Knowledge Base", use_container_width=True):
@@ -145,29 +166,31 @@ with st.sidebar:
     st.session_state.show_thinking = st.checkbox("Show thinking process", value=True)
     st.divider()
 
-    st.subheader("📋 Active Tasks")
-    task_queue = TaskQueue(db_path=os.path.join(BASE_DIR, "yukti_tasks.db"))
-    if st.button("Refresh Tasks"):
-        st.rerun()
-    active = task_queue.get_active_tasks()
-    for task_id, variant, status, progress in active:
-        with st.container():
-            st.markdown(f"**{variant}** ({task_id[:8]})")
-            if status == "processing":
-                st.progress(progress/100, text=f"{progress}%")
-            elif status in ("submitted", "pending"):
-                st.text("⏳ Queued")
-            else:
-                st.text(f"Status: {status}")
-    completed = task_queue.conn.execute(
-        "SELECT variant, result_url FROM tasks WHERE status='completed' ORDER BY completed_at DESC LIMIT 5"
-    ).fetchall()
-    if completed:
-        st.markdown("---")
-        st.markdown("✅ Recent Results")
-        for variant, url in completed:
-            st.markdown(f"- {variant}: [View]({url})")
-    st.divider()
+    # ---------- Task Monitor (only if Zhipu available) ----------
+    if ZHIPU_AVAILABLE:
+        st.subheader("📋 Active Tasks")
+        task_queue = TaskQueue(db_path=os.path.join(BASE_DIR, "yukti_tasks.db"))
+        if st.button("Refresh Tasks"):
+            st.rerun()
+        active = task_queue.get_active_tasks()
+        for task_id, variant, status, progress in active:
+            with st.container():
+                st.markdown(f"**{variant}** ({task_id[:8]})")
+                if status == "processing":
+                    st.progress(progress/100, text=f"{progress}%")
+                elif status in ("submitted", "pending"):
+                    st.text("⏳ Queued")
+                else:
+                    st.text(f"Status: {status}")
+        completed = task_queue.conn.execute(
+            "SELECT variant, result_url FROM tasks WHERE status='completed' ORDER BY completed_at DESC LIMIT 5"
+        ).fetchall()
+        if completed:
+            st.markdown("---")
+            st.markdown("✅ Recent Results")
+            for variant, url in completed:
+                st.markdown(f"- {variant}: [View]({url})")
+        st.divider()
 
     st.subheader("Sources")
     for src in SOURCES:
@@ -178,7 +201,7 @@ with st.sidebar:
         st.session_state.messages = [{"role": "assistant", "content": "Hello! I'm Yukti AI. How can I help you today?"}]
         st.rerun()
 
-# Chat interface
+# ---------- Chat interface ----------
 for msg in st.session_state.messages:
     with st.chat_message(msg["role"]):
         st.markdown(msg["content"])
@@ -200,9 +223,12 @@ if prompt := st.chat_input("Ask me anything..."):
                     result = think(prompt, history, st.session_state.selected_model)
 
                 if result.get("type") == "async":
-                    task_id = result["task_id"]
-                    variant = result["variant"]
-                    full_response = f"🎨 **{variant} task started!**\n\nTask ID: `{task_id}`\n\nCheck progress in the sidebar."
+                    if not ZHIPU_AVAILABLE:
+                        full_response = "Async tasks are disabled because Zhipu is not available."
+                    else:
+                        task_id = result["task_id"]
+                        variant = result["variant"]
+                        full_response = f"🎨 **{variant} task started!**\n\nTask ID: `{task_id}`\n\nCheck progress in the sidebar."
                     response_placeholder.markdown(full_response)
                 else:
                     if st.session_state.show_thinking and result.get("monologue"):
@@ -222,4 +248,5 @@ if prompt := st.chat_input("Ask me anything..."):
             st.error(f"An error occurred: {e}")
             full_response = ""
 
+    # Save assistant message
     st.session_state.messages.append({"role": "assistant", "content": full_response if result.get("type")=="async" else answer})

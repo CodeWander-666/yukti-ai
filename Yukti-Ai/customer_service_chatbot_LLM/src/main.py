@@ -1,6 +1,6 @@
 """
-Yukti AI – Main Application (Ultimate Edition)
-Orchestrates all models with real‑time progress, futuristic UI, and bulletproof error handling.
+Yukti AI – Main Application (Ultimate UI Edition)
+Professional interface with file upload, persistent media, and premium styling.
 """
 
 import os
@@ -47,13 +47,13 @@ st.set_page_config(
 )
 
 # ----------------------------------------------------------------------
-# Futuristic UI with glass morphism and gradients
+# Premium Futuristic CSS with 3D buttons and compact media
 # ----------------------------------------------------------------------
 st.markdown("""
 <style>
     /* Global theme */
     .stApp {
-        background: linear-gradient(135deg, #0b0c1e 0%, #1a1b2f 100%);
+        background: linear-gradient(135deg, #0a0b1a 0%, #14152b 100%);
         color: #e0e0ff;
     }
     /* Chat messages */
@@ -79,50 +79,46 @@ st.markdown("""
         backdrop-filter: blur(10px);
         border-right: 1px solid rgba(255,255,255,0.05);
     }
-    /* Buttons */
+    /* Premium 3D Buttons */
     .stButton > button {
-        background: linear-gradient(90deg, #667eea 0%, #764ba2 100%);
-        color: white;
+        background: linear-gradient(145deg, #1e1e3f, #2a2a5a);
         border: none;
-        border-radius: 50px;
-        padding: 0.5rem 2rem;
+        border-radius: 15px;
+        padding: 0.6rem 1.5rem;
+        color: #fff;
         font-weight: 600;
-        transition: all 0.3s;
-        box-shadow: 0 4px 15px rgba(102,126,234,0.4);
+        font-size: 1rem;
+        box-shadow: 0 5px 0 #0b0b1a, 0 10px 20px rgba(0,0,0,0.4);
+        transition: all 0.1s ease;
+        transform: translateY(0);
+        margin: 0.5rem 0;
+        width: 100%;
+        cursor: pointer;
+        border-bottom: 2px solid #4f4f9f;
     }
     .stButton > button:hover {
         transform: translateY(-2px);
-        box-shadow: 0 6px 20px rgba(102,126,234,0.6);
+        box-shadow: 0 7px 0 #0b0b1a, 0 15px 25px rgba(0,0,0,0.5);
+        background: linear-gradient(145deg, #2a2a5a, #3a3a7a);
     }
-    /* Input field */
-    .stTextInput > div > div > input {
-        background: rgba(255,255,255,0.05);
-        border: 1px solid rgba(255,255,255,0.1);
-        border-radius: 50px;
-        color: white;
-        padding: 0.75rem 1.5rem;
-        font-size: 1.1rem;
+    .stButton > button:active {
+        transform: translateY(4px);
+        box-shadow: 0 2px 0 #0b0b1a, 0 8px 15px rgba(0,0,0,0.4);
     }
-    .stTextInput > div > div > input:focus {
-        border-color: #667eea;
-        box-shadow: 0 0 0 2px rgba(102,126,234,0.3);
-    }
-    /* Headers */
-    h1, h2, h3 {
-        font-family: 'Inter', sans-serif;
-        background: linear-gradient(90deg, #f0f0ff, #a0b0ff);
-        -webkit-background-clip: text;
-        -webkit-text-fill-color: transparent;
-        font-weight: 600;
-    }
-    /* Task containers */
-    .task-container {
-        background: rgba(20,20,40,0.6);
-        backdrop-filter: blur(10px);
+    /* File uploader styling */
+    .stFileUploader {
+        background: rgba(30,30,60,0.5);
         border-radius: 15px;
         padding: 1rem;
+        border: 1px dashed #5a5a9a;
+    }
+    /* Compact images in chat */
+    .stImage {
+        max-width: 300px;
+        max-height: 300px;
+        border-radius: 12px;
+        border: 2px solid rgba(255,255,255,0.2);
         margin: 0.5rem 0;
-        border: 1px solid rgba(255,255,255,0.1);
     }
     /* Progress bar */
     .stProgress > div > div > div {
@@ -153,12 +149,12 @@ if "knowledge_base_ready" not in st.session_state:
     except Exception as e:
         logger.error(f"Failed to check knowledge base status: {e}")
         st.session_state.knowledge_base_ready = False
-if "show_thinking" not in st.session_state:
-    st.session_state.show_thinking = True
 if "tasks" not in st.session_state:
     st.session_state.tasks = {}  # task_id -> {variant, status, progress, result_url, error}
 if "task_refresh_counter" not in st.session_state:
     st.session_state.task_refresh_counter = 0
+if "uploaded_files" not in st.session_state:
+    st.session_state.uploaded_files = {}  # model -> list of file paths (for persistence)
 
 # ----------------------------------------------------------------------
 # Data sources configuration
@@ -276,7 +272,6 @@ def render_task(task_id):
         return
 
     with st.container():
-        st.markdown(f"<div class='task-container'>", unsafe_allow_html=True)
         cols = st.columns([3, 1])
         with cols[0]:
             st.markdown(f"**{task_info['variant']}**  \n`{task_id[:8]}`")
@@ -290,82 +285,217 @@ def render_task(task_id):
                 st.info("⏳ Queued...")
         with cols[1]:
             if task_info['status'] == 'processing':
-                if st.button("Refresh", key=f"refresh_{task_id}"):
+                if st.button("⟳", key=f"refresh_{task_id}"):
                     updated = get_task_status(task_id)
                     if updated:
                         st.session_state.tasks[task_id].update(updated)
                     st.rerun()
             elif task_info['status'] == 'completed' and task_info.get('result_url'):
-                # Provide download button
+                # Download button (will not remove media)
                 if task_info['variant'] == 'Yukti‑Video':
                     st.markdown(f"[🎬 Watch Video]({task_info['result_url']})")
-                    st.download_button("Download", data=requests.get(task_info['result_url']).content,
+                    st.download_button("📥 Download", data=requests.get(task_info['result_url']).content,
                                        file_name=f"yukti_video_{task_id[:8]}.mp4")
                 else:
-                    st.image(task_info['result_url'], use_container_width=True)
-                    st.download_button("Download Image", data=requests.get(task_info['result_url']).content,
+                    st.image(task_info['result_url'], use_container_width=False, width=300)
+                    st.download_button("📥 Download Image", data=requests.get(task_info['result_url']).content,
                                        file_name=f"yukti_image_{task_id[:8]}.png")
-        st.markdown("</div>", unsafe_allow_html=True)
 
 # ----------------------------------------------------------------------
-# Sidebar
+# Sidebar – cleaned up
 # ----------------------------------------------------------------------
 with st.sidebar:
-    st.markdown("## 🧠 Control Panel")
+    st.markdown("## 🧠 Brain")
 
-    st.markdown("### Knowledge Base")
-    if st.button("🔄 Update Knowledge Base", use_container_width=True):
-        rebuild_knowledge_base()
+    # Model selector – fixed text, no label above (we use heading)
+    model_options = get_available_models()
+    # Create display names with description baked in
+    display_names = [f"{m} – {MODELS[m]['description']}" for m in model_options]
+    selected_display = st.selectbox(
+        "",  # empty label
+        options=display_names,
+        index=0,
+        key="model_display"
+    )
+    # Extract actual model key from display name
+    selected_model = model_options[display_names.index(selected_display)]
+    st.session_state.selected_model = selected_model
+
+    # File upload area (visible only when relevant)
+    uploaded_file = None
+    if selected_model in ["Yukti‑Video", "Yukti‑Image", "Yukti‑Audio"]:
+        st.markdown("### 📎 Attach File")
+        if selected_model == "Yukti‑Video":
+            uploaded_file = st.file_uploader("Upload image (optional)", type=["png", "jpg", "jpeg"])
+        elif selected_model == "Yukti‑Image":
+            uploaded_file = st.file_uploader("Upload reference image (optional)", type=["png", "jpg", "jpeg"])
+        elif selected_model == "Yukti‑Audio":
+            uploaded_file = st.file_uploader("Upload audio (optional)", type=["mp3", "wav"])
+
     st.divider()
 
-    st.markdown("### Status")
+    # Knowledge Base (simplified)
+    st.markdown("### 📚 Knowledge Base")
+    if st.button("🔄 Update", use_container_width=True):
+        rebuild_knowledge_base()
     if st.session_state.knowledge_base_ready:
         st.markdown("✅ **Active**")
     else:
-        st.markdown("⚠️ **Not built** – click update above.")
+        st.markdown("⚠️ **Not built**")
 
     st.divider()
 
-    st.markdown("### Brain")
-    try:
-        model_options = get_available_models()
-    except Exception as e:
-        st.error(f"Failed to load models: {e}")
-        model_options = []
-    selected_model = st.selectbox(
-        "Choose thinking style",
-        options=model_options,
-        format_func=lambda x: f"{x} – {MODELS[x]['description']}",
-        key="model_selector"
-    )
-    st.session_state.selected_model = selected_model
+    # Clear Conversation
+    if st.button("🗑️ Clear Chat", use_container_width=True):
+        st.session_state.messages = [
+            {"role": "assistant", "content": "Hello! I'm Yukti AI. How can I help you today?"}
+        ]
+        # Optionally clear uploaded files? We'll keep them in session.
+        st.rerun()
 
-    # Additional parameters based on model
-    if selected_model == "Yukti‑Audio":
-        voice = st.selectbox("Voice", ["female", "male", "jam", "kazi", "douji"], index=0)
-        st.session_state.voice = voice
-    elif selected_model == "Yukti‑Video":
-        quality = st.selectbox("Quality", ["quality", "speed"], index=0)
-        with_audio = st.checkbox("Include audio", value=True)
-        size = st.selectbox("Resolution", ["1920x1080", "1280x720", "3840x2160"], index=0)
-        fps = st.selectbox("FPS", [30, 60], index=0)
-        st.session_state.video_params = {
-            "quality": quality,
-            "with_audio": with_audio,
-            "size": size,
-            "fps": fps
-        }
+# ----------------------------------------------------------------------
+# Main chat interface
+# ----------------------------------------------------------------------
+for msg in st.session_state.messages:
+    with st.chat_message(msg["role"]):
+        st.markdown(msg["content"])
+        # If the message contains generated media, display it compactly
+        if "media" in msg:
+            for media in msg["media"]:
+                if media["type"] == "image":
+                    st.image(media["url"], use_container_width=False, width=300)
+                elif media["type"] == "audio":
+                    st.audio(media["url"])
+                elif media["type"] == "video":
+                    st.video(media["url"])
 
-    st.divider()
+# Chat input
+if prompt := st.chat_input("Ask me anything..."):
+    # Add user message
+    st.session_state.messages.append({"role": "user", "content": prompt})
+    with st.chat_message("user"):
+        st.markdown(prompt)
 
-    st.markdown("### Display")
-    st.session_state.show_thinking = st.checkbox("Show thinking process", value=True)
+    # Generate response
+    with st.chat_message("assistant"):
+        response_placeholder = st.empty()
+        result = None
+        answer = ""
+        full_response = ""
+        media = []
 
-    st.divider()
+        try:
+            model_key = st.session_state.selected_model
+            config = MODELS.get(model_key, {})
 
-    if ZHIPU_AVAILABLE:
-        st.markdown("### 📋 Active Tasks")
-        if st.button("🔄 Refresh All Tasks", use_container_width=True):
+            # For generation models that may need uploaded file
+            extra_kwargs = {}
+            if uploaded_file is not None:
+                # Save uploaded file temporarily
+                with tempfile.NamedTemporaryFile(delete=False, suffix=Path(uploaded_file.name).suffix) as tmp:
+                    tmp.write(uploaded_file.getvalue())
+                    extra_kwargs["image_url"] = tmp.name  # or file path, adjust based on API
+
+            # Check if knowledge base is needed (for text models)
+            if config.get("type") == "sync" and config.get("model") in ["glm-4-flash", "glm-5"]:
+                if not st.session_state.knowledge_base_ready:
+                    full_response = "The knowledge base is not ready. Please click 'Update' in the sidebar first."
+                    response_placeholder.markdown(full_response)
+                    result = {"type": "sync", "answer": full_response}
+                else:
+                    history = [
+                        {"role": msg["role"], "content": msg["content"]}
+                        for msg in st.session_state.messages[-10:]
+                    ]
+                    with st.spinner("Thinking..."):
+                        result = think(prompt, history, model_key)
+            else:
+                # Generation models (image, video, audio) – bypass think
+                model = load_model(model_key)
+                with st.spinner("Generating..."):
+                    if model_key == "Yukti‑Audio":
+                        voice = "female"  # could add a selector if desired
+                        audio_path = model.invoke(prompt, voice=voice, **extra_kwargs)
+                        with open(audio_path, "rb") as f:
+                            audio_bytes = f.read()
+                        st.audio(audio_bytes, format="audio/wav")
+                        st.download_button("📥 Download Audio", data=audio_bytes, file_name="yukti_audio.wav")
+                        full_response = "Audio generated."
+                        result = {"type": "sync", "format": "audio"}
+                        media.append({"type": "audio", "url": audio_path})
+                    elif model_key == "Yukti‑Image":
+                        image_url = model.invoke(prompt, **extra_kwargs)
+                        # Display compactly
+                        st.image(image_url, use_container_width=False, width=300)
+                        # Download button
+                        img_data = requests.get(image_url).content
+                        st.download_button("📥 Download Image", data=img_data, file_name="yukti_image.png")
+                        full_response = "Image generated."
+                        result = {"type": "sync", "format": "image"}
+                        media.append({"type": "image", "url": image_url})
+                    elif model_key == "Yukti‑Video":
+                        params = {}  # could add advanced params later
+                        task_id = model.invoke(prompt, **extra_kwargs)
+                        st.session_state.tasks[task_id] = {
+                            "variant": "Yukti‑Video",
+                            "status": "submitted",
+                            "progress": 0,
+                            "result_url": None,
+                            "error": None
+                        }
+                        full_response = f"Video task started: `{task_id}`"
+                        result = {"type": "async", "task_id": task_id}
+                    else:
+                        # Fallback to think for other sync models (like Gemini)
+                        history = [
+                            {"role": msg["role"], "content": msg["content"]}
+                            for msg in st.session_state.messages[-10:]
+                        ]
+                        with st.spinner("Thinking..."):
+                            result = think(prompt, history, model_key)
+
+            # Handle result from think (if any)
+            if result and result.get("type") == "async":
+                task_id = result.get("task_id")
+                # Show a mini progress indicator in chat (optional)
+                st.info(f"Task {task_id} submitted. Check sidebar for progress.")
+            elif result and result.get("type") == "sync" and result.get("answer"):
+                answer = result.get("answer", "")
+                # Always show thinking process (no toggle)
+                if result.get("monologue"):
+                    with st.expander("Show thinking process"):
+                        st.markdown(result["monologue"])
+                stream_response(response_placeholder, answer, delay=0.03)
+                if result.get("sources"):
+                    with st.expander("View source documents"):
+                        for i, doc in enumerate(result["sources"][:3]):
+                            st.markdown(f"**Source {i+1}:**")
+                            st.write(doc.page_content[:500] + "..." if len(doc.page_content) > 500 else doc.page_content)
+                            if i < len(result["sources"]) - 1:
+                                st.divider()
+                st.caption(f"Thought for {result.get('thinking_time', 0):.2f}s")
+
+        except Exception as e:
+            st.error(f"An unexpected error occurred: {e}")
+            logger.exception("Fatal error in main chat loop")
+            full_response = ""
+
+    # Save assistant message to history (with media)
+    if result and result.get("type") == "sync" and result.get("answer"):
+        st.session_state.messages.append({"role": "assistant", "content": answer, "media": media})
+    elif result and result.get("type") == "async":
+        st.session_state.messages.append({"role": "assistant", "content": full_response})
+    elif full_response:
+        st.session_state.messages.append({"role": "assistant", "content": full_response})
+
+# ----------------------------------------------------------------------
+# Periodic task refresh (optional, but we can add a button in sidebar)
+# ----------------------------------------------------------------------
+if ZHIPU_AVAILABLE:
+    with st.sidebar:
+        st.divider()
+        st.markdown("### 📋 Tasks")
+        if st.button("⟳ Refresh Tasks", use_container_width=True):
             st.rerun()
         # Fetch fresh task list
         try:
@@ -388,133 +518,6 @@ with st.sidebar:
         except Exception as e:
             st.warning(f"Could not fetch tasks: {e}")
 
-        # Render all active tasks
+        # Render active tasks in sidebar
         for task_id in list(st.session_state.tasks.keys()):
             render_task(task_id)
-        st.divider()
-
-    st.markdown("### Sources")
-    for src in SOURCES:
-        st.markdown(f"- **{src['name']}**")
-
-    st.divider()
-
-    if st.button("🗑️ Clear Conversation", use_container_width=True):
-        st.session_state.messages = [
-            {"role": "assistant", "content": "Hello! I'm Yukti AI. How can I help you today?"}
-        ]
-        st.rerun()
-
-# ----------------------------------------------------------------------
-# Main chat interface
-# ----------------------------------------------------------------------
-for msg in st.session_state.messages:
-    with st.chat_message(msg["role"]):
-        st.markdown(msg["content"])
-
-# Chat input
-if prompt := st.chat_input("Ask me anything..."):
-    # Add user message
-    st.session_state.messages.append({"role": "user", "content": prompt})
-    with st.chat_message("user"):
-        st.markdown(prompt)
-
-    # Generate response
-    with st.chat_message("assistant"):
-        response_placeholder = st.empty()
-        result = None
-        answer = ""
-        full_response = ""
-
-        try:
-            model_key = st.session_state.selected_model
-            config = MODELS.get(model_key, {})
-
-            # Check if knowledge base is needed (for text models)
-            if config.get("type") == "sync" and config.get("api") == "chat":
-                if not st.session_state.knowledge_base_ready:
-                    full_response = "The knowledge base is not ready. Please click 'Update Knowledge Base' in the sidebar first."
-                    response_placeholder.markdown(full_response)
-                    result = {"type": "sync", "answer": full_response}
-                else:
-                    history = [
-                        {"role": msg["role"], "content": msg["content"]}
-                        for msg in st.session_state.messages[-10:]
-                    ]
-                    with st.spinner("Thinking..."):
-                        result = think(prompt, history, model_key)
-            else:
-                # Generation models (image, video, audio) – bypass think
-                model = load_model(model_key)
-                with st.spinner("Generating..."):
-                    if model_key == "Yukti‑Audio":
-                        result = model.invoke(prompt, voice=st.session_state.get("voice", "female"))
-                        # result is a file path
-                        with open(result, "rb") as f:
-                            audio_bytes = f.read()
-                        st.audio(audio_bytes, format="audio/wav")
-                        st.download_button("Download Audio", data=audio_bytes, file_name="yukti_audio.wav")
-                        full_response = "Audio generated."
-                        result = {"type": "sync", "format": "audio"}
-                    elif model_key == "Yukti‑Image":
-                        image_url = model.invoke(prompt)
-                        st.image(image_url, use_container_width=True)
-                        # Download button
-                        img_data = requests.get(image_url).content
-                        st.download_button("Download Image", data=img_data, file_name="yukti_image.png")
-                        full_response = "Image generated."
-                        result = {"type": "sync", "format": "image"}
-                    elif model_key == "Yukti‑Video":
-                        params = st.session_state.get("video_params", {})
-                        task_id = model.invoke(prompt, **params)
-                        st.session_state.tasks[task_id] = {
-                            "variant": "Yukti‑Video",
-                            "status": "submitted",
-                            "progress": 0,
-                            "result_url": None,
-                            "error": None
-                        }
-                        full_response = f"Video task started: `{task_id}`"
-                        result = {"type": "async", "task_id": task_id}
-                    else:
-                        # Fallback to think for other sync models (like Gemini)
-                        history = [
-                            {"role": msg["role"], "content": msg["content"]}
-                            for msg in st.session_state.messages[-10:]
-                        ]
-                        with st.spinner("Thinking..."):
-                            result = think(prompt, history, model_key)
-
-            # Handle result from think (if any)
-            if result and result.get("type") == "async":
-                # Already handled above, but we have task_id
-                task_id = result.get("task_id")
-                # Optionally show a mini progress indicator in chat
-                st.info(f"Task {task_id} submitted. Check sidebar for progress.")
-            elif result and result.get("type") == "sync" and result.get("answer"):
-                answer = result.get("answer", "")
-                if st.session_state.show_thinking and result.get("monologue"):
-                    with st.expander("Show thinking process"):
-                        st.markdown(result["monologue"])
-                stream_response(response_placeholder, answer, delay=0.03)
-                if result.get("sources"):
-                    with st.expander("View source documents"):
-                        for i, doc in enumerate(result["sources"][:3]):
-                            st.markdown(f"**Source {i+1}:**")
-                            st.write(doc.page_content[:500] + "..." if len(doc.page_content) > 500 else doc.page_content)
-                            if i < len(result["sources"]) - 1:
-                                st.divider()
-                st.caption(f"Thought for {result.get('thinking_time', 0):.2f}s")
-
-        except Exception as e:
-            st.error(f"An unexpected error occurred: {e}")
-            logger.exception("Fatal error in main chat loop")
-            full_response = ""
-
-    # Save assistant message to history (only for text responses)
-    if result and result.get("type") == "sync" and result.get("answer"):
-        st.session_state.messages.append({"role": "assistant", "content": answer})
-    elif result and result.get("type") == "async":
-        st.session_state.messages.append({"role": "assistant", "content": full_response})
-    elif full_response:
-        st.session_state.messages.append({"role": "assistant", "content": full_response})

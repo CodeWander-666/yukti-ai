@@ -8,7 +8,7 @@ from langchain_helper import get_qa_chain, get_embeddings, VECTORDB_PATH, BASE_D
 # ---------- Page Configuration ----------
 st.set_page_config(
     page_title="Yukti AI",
-    page_icon="✨",
+    page_icon="AI",
     layout="wide",
     initial_sidebar_state="expanded"
 )

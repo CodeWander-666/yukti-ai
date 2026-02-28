@@ -1,11 +1,13 @@
 """
-Yukti AI – Human-like Thinking Engine
-Global knowledge access, associative recall, internal monologue, self-questioning.
+Yukti AI – Advanced Thinking Engine
+Human-like reasoning with associative memory, self-questioning, and emotional awareness.
+Optimized for speed: caching, parallel retrieval, concise prompts.
 """
 
 import logging
 import hashlib
-from typing import List, Dict, Any, Optional
+import time
+from typing import List, Dict, Any, Optional, Generator
 from concurrent.futures import ThreadPoolExecutor, as_completed
 from langchain_core.documents import Document
 from langchain_helper import get_llm, retrieve_documents
@@ -21,16 +23,16 @@ CACHE_TTL = 3600  # 1 hour
 def _cache_key(query: str) -> str:
     return hashlib.md5(query.encode()).hexdigest()
 
-def get_cached_retrieval(query: str, k: int = 5) -> Optional[List[Document]]:
+def get_cached_retrieval(query: str) -> Optional[List[Document]]:
     key = _cache_key(query)
     entry = _retrieval_cache.get(key)
-    if entry and entry["ttl"] > 0:
+    if entry and (time.time() - entry["timestamp"]) < CACHE_TTL:
         return entry["docs"]
     return None
 
-def set_cached_retrieval(query: str, docs: List[Document], ttl: int = CACHE_TTL):
+def set_cached_retrieval(query: str, docs: List[Document]):
     key = _cache_key(query)
-    _retrieval_cache[key] = {"docs": docs, "ttl": ttl}
+    _retrieval_cache[key] = {"docs": docs, "timestamp": time.time()}
 
 # ----------------------------------------------------------------------
 # Query expansion – generate multiple related questions
@@ -46,24 +48,23 @@ Alternative phrasings:"""
     try:
         response = llm.invoke(prompt)
         alternatives = [line.strip() for line in response.split("\n") if line.strip()]
-        # Always include the original
         return [original_query] + alternatives[:3]
     except Exception as e:
         logger.warning(f"Query expansion failed: {e}")
         return [original_query]
 
 # ----------------------------------------------------------------------
-# Retrieve and merge documents from multiple queries
+# Retrieve and merge documents from multiple queries (parallel)
 # ----------------------------------------------------------------------
 def retrieve_diverse(query: str, k: int = 3) -> List[Document]:
     """
-    Expand query, retrieve for each, deduplicate, and return top k unique documents.
+    Expand query, retrieve for each variant in parallel, deduplicate.
     """
     # Check cache
     cached = get_cached_retrieval(query)
     if cached is not None:
         logger.info("Retrieval cache hit")
-        return cached[:k*2]  # return a bit more for diversity
+        return cached[:k*2]
 
     llm = get_llm()
     expanded = expand_query(query, llm)
@@ -71,20 +72,22 @@ def retrieve_diverse(query: str, k: int = 3) -> List[Document]:
     all_docs = []
     seen = set()
     with ThreadPoolExecutor(max_workers=3) as executor:
-        future_to_q = {executor.submit(retrieve_documents, q, k*2): q for q in expanded}
+        future_to_q = {
+            executor.submit(retrieve_documents, q, k*2): q
+            for q in expanded
+        }
         for future in as_completed(future_to_q):
             try:
                 docs = future.result()
                 for doc in docs:
-                    # Use page content as simple dedup key (or metadata['source']+chunk)
-                    key = doc.page_content[:200]  # first 200 chars as fingerprint
+                    # Simple dedup using first 200 chars
+                    key = doc.page_content[:200]
                     if key not in seen:
                         seen.add(key)
                         all_docs.append(doc)
             except Exception as e:
                 logger.error(f"Retrieval failed for a variant: {e}")
 
-    # Sort by relevance? Not without scores; we'll keep order as they came.
     result = all_docs[:k*3]
     set_cached_retrieval(query, result)
     return result
@@ -110,43 +113,50 @@ Structured summary (use bullet points and categories):"""
         return combined  # fallback
 
 # ----------------------------------------------------------------------
-# Main thinking function
+# Main thinking function – returns structured output
 # ----------------------------------------------------------------------
 def think(
     user_query: str,
     conversation_history: List[Dict[str, str]]
-) -> str:
+) -> Dict[str, Any]:
     """
-    Generate a human‑like answer using:
-    - Diverse retrieval
-    - Knowledge organization
-    - Internal monologue with self‑questioning
-    - Final answer
+    Generate a human‑like answer with transparent reasoning.
+    Returns dict with keys: 'answer', 'monologue', 'sources', 'thinking_time'.
     """
-    # Get the LLM (cached)
+    start_time = time.time()
     llm = get_llm()
 
-    # Step 1: Retrieve diverse memories
+    # Step 1: Retrieve memories (fast, cached)
     logger.info("Retrieving memories...")
     try:
         docs = retrieve_diverse(user_query, k=3)
     except FileNotFoundError:
-        return "The knowledge base is not ready. Please update it first."
+        return {
+            "answer": "The knowledge base is not ready. Please update it first.",
+            "monologue": "",
+            "sources": [],
+            "thinking_time": 0.0
+        }
     except Exception as e:
         logger.exception("Retrieval error")
-        return f"Sorry, I encountered an error accessing my memory: {e}"
+        return {
+            "answer": f"Sorry, I encountered an error accessing my memory: {e}",
+            "monologue": "",
+            "sources": [],
+            "thinking_time": 0.0
+        }
 
-    # Step 2: Organize knowledge
+    # Step 2: Organize knowledge (one LLM call)
     logger.info("Organizing knowledge...")
     knowledge_summary = organize_knowledge(docs, llm)
 
-    # Step 3: Format conversation history (last 5 exchanges)
+    # Step 3: Format conversation history
     history_str = ""
     for turn in conversation_history[-5:]:
         role = "User" if turn["role"] == "user" else "Yukti"
         history_str += f"{role}: {turn['content']}\n"
 
-    # Step 4: Internal monologue + reasoning prompt
+    # Step 4: Generate reasoning and final answer (single LLM call)
     reasoning_prompt = f"""You are Yukti AI, a deeply thoughtful assistant. You have access to your memories (organized below) and the conversation history. Now, think step by step:
 
 1. **Review memories**: What facts, examples, or procedures are relevant?
@@ -174,20 +184,26 @@ ANSWER:
         full_response = llm.invoke(reasoning_prompt)
     except Exception as e:
         logger.exception("Reasoning failed")
-        return f"Sorry, I couldn't think through that: {e}"
+        return {
+            "answer": f"Sorry, I couldn't think through that: {e}",
+            "monologue": "",
+            "sources": docs,
+            "thinking_time": time.time() - start_time
+        }
 
-    # Extract answer part
-    if "ANSWER:" in full_response:
-        answer = full_response.split("ANSWER:", 1)[1].strip()
-    else:
-        # Fallback: use whole response but try to remove monologue if present
-        if "MONOLOGUE:" in full_response:
-            parts = full_response.split("MONOLOGUE:", 1)
-            after = parts[1]
-            if "ANSWER:" in after:
-                answer = after.split("ANSWER:", 1)[1].strip()
-            else:
-                answer = after.strip()
-        else:
-            answer = full_response.strip()
-    return answer
+    # Extract monologue and answer
+    monologue = ""
+    answer = full_response
+    if "MONOLOGUE:" in full_response and "ANSWER:" in full_response:
+        parts = full_response.split("MONOLOGUE:", 1)[1]
+        if "ANSWER:" in parts:
+            monologue, answer = parts.split("ANSWER:", 1)
+            monologue = monologue.strip()
+            answer = answer.strip()
+
+    return {
+        "answer": answer,
+        "monologue": monologue,
+        "sources": docs,
+        "thinking_time": time.time() - start_time
+    }

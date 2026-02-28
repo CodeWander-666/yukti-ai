@@ -1,5 +1,13 @@
 import os
+import sys
 import time
+from pathlib import Path
+
+# Add project root (yukti-ai/) to Python path
+project_root = Path(__file__).parent.parent.parent.parent  # goes up to yukti-ai/
+if str(project_root) not in sys.path:
+    sys.path.insert(0, str(project_root))
+
 import streamlit as st
 import pandas as pd
 from langchain_core.documents import Document
@@ -7,7 +15,8 @@ from langchain_community.vectorstores import FAISS
 from langchain_helper import get_embeddings, VECTORDB_PATH, BASE_DIR, create_vector_db
 from think import think
 from model_manager import get_available_models, MODELS
-from LLM.zhipu.queue_manager import TaskQueue  # import directly
+from LLM.zhipu.queue_manager import TaskQueue
+
 
 # ---------- Page Configuration ----------
 st.set_page_config(

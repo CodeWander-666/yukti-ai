@@ -83,9 +83,10 @@ def get_model_config(model_key: str) -> Optional[Dict[str, Any]]:
     return MODELS.get(model_key)
 
 # ----------------------------------------------------------------------
-# If Zhipu is unavailable, define dummy client and queue that raise helpful errors
+# If Zhipu is unavailable, define dummy classes and functions
 # ----------------------------------------------------------------------
 if not ZHIPU_AVAILABLE:
+    # Dummy client and queue that raise helpful errors
     class ZhipuAI:
         def __init__(self, *args, **kwargs):
             raise RuntimeError(f"Zhipu SDK not installed: {ZHIPU_SDK_IMPORT_ERROR}")
@@ -102,10 +103,15 @@ if not ZHIPU_AVAILABLE:
 
     _task_queue = ZhipuTaskQueue()
 
-    # We'll still define get_zhipu_client but it will fail if called
     @st.cache_resource
     def get_zhipu_client():
         raise RuntimeError("Zhipu SDK not installed. Please install it with: pip install zhipuai")
+
+    # For compatibility, define dummy task functions
+    def get_active_tasks() -> List[Tuple[str, str, str, int]]:
+        return []
+    def get_task_status(task_id: str) -> Optional[Dict[str, Any]]:
+        return None
 
 # ----------------------------------------------------------------------
 # If Zhipu is available, proceed with real implementation
@@ -249,6 +255,13 @@ else:
 
     _task_queue = ZhipuTaskQueue(db_path=str(Path(__file__).parent.parent / "yukti_tasks.db"))
 
+    # Public task functions
+    def get_active_tasks() -> List[Tuple[str, str, str, int]]:
+        return _task_queue.get_active_tasks()
+
+    def get_task_status(task_id: str) -> Optional[Dict[str, Any]]:
+        return _task_queue.get_task(task_id)
+
 # ----------------------------------------------------------------------
 # YuktiModel wrapper – works with or without Zhipu
 # ----------------------------------------------------------------------
@@ -316,13 +329,3 @@ class YuktiModel:
 # ----------------------------------------------------------------------
 def load_model(model_key: str) -> YuktiModel:
     return YuktiModel(model_key)
-
-def get_task_status(task_id: str) -> Optional[Dict[str, Any]]:
-    if not ZHIPU_AVAILABLE:
-        return None
-    return _task_queue.get_task(task_id)
-
-def get_active_tasks() -> List[Tuple[str, str, str, int]]:
-    if not ZHIPU_AVAILABLE:
-        return []
-    return _task_queue.get_active_tasks()

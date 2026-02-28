@@ -10,7 +10,7 @@ import pandas as pd
 from langchain_core.documents import Document
 from langchain_community.vectorstores import FAISS
 
-# ---------- Local imports (must be in same directory) ----------
+# ---------- Local imports ----------
 from langchain_helper import get_embeddings, VECTORDB_PATH, BASE_DIR, create_vector_db
 from think import think
 from model_manager import (
@@ -115,7 +115,6 @@ def load_all_documents():
                 st.sidebar.warning(f"File not found: {path}")
                 continue
             try:
-                # Try multiple encodings
                 encodings = ['utf-8', 'cp1252', 'latin-1', 'iso-8859-1']
                 df = None
                 for enc in encodings:
@@ -127,7 +126,6 @@ def load_all_documents():
                 if df is None:
                     st.sidebar.error(f"Cannot read {path}")
                     return None
-                # Check required columns
                 missing = [c for c in src["columns"] if c not in df.columns]
                 if missing:
                     st.sidebar.error(f"Missing columns {missing} in {path}")
@@ -219,7 +217,6 @@ with st.sidebar:
                     st.text("⏳ Queued")
                 else:
                     st.text(f"Status: {status}")
-        # Optionally show recent completed tasks (we can add later)
         st.divider()
 
     st.subheader("Sources")
@@ -249,10 +246,14 @@ if prompt := st.chat_input("Ask me anything..."):
     # Generate response
     with st.chat_message("assistant"):
         response_placeholder = st.empty()
+        result = None  # Initialize result
+        answer = ""    # Initialize answer
+
         try:
             if not st.session_state.knowledge_base_ready:
                 full_response = "The knowledge base is not ready. Please click 'Update Knowledge Base' in the sidebar first."
                 response_placeholder.markdown(full_response)
+                result = {"type": "sync", "answer": full_response}
             else:
                 # Prepare conversation history (last 10 messages)
                 history = [
@@ -262,7 +263,6 @@ if prompt := st.chat_input("Ask me anything..."):
                 with st.spinner("Thinking..."):
                     result = think(prompt, history, st.session_state.selected_model)
 
-                # Handle async vs sync
                 if result.get("type") == "async":
                     task_id = result["task_id"]
                     variant = result["variant"]
@@ -286,13 +286,13 @@ if prompt := st.chat_input("Ask me anything..."):
                                     st.divider()
                     # Show thinking time
                     st.caption(f"Thought for {result.get('thinking_time', 0):.2f}s")
-
         except Exception as e:
             st.error(f"An error occurred: {e}")
             full_response = ""
+            result = {"type": "sync", "answer": full_response}
 
     # Save assistant message to history
-    if result.get("type") == "async":
+    if result and result.get("type") == "async":
         st.session_state.messages.append({"role": "assistant", "content": full_response})
     else:
-        st.session_state.messages.append({"role": "assistant", "content": answer})
+        st.session_state.messages.append({"role": "assistant", "content": answer if answer else full_response})

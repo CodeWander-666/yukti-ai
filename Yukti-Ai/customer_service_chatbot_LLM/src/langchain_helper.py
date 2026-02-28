@@ -32,13 +32,12 @@ def get_llm():
     for model in GEMINI_MODELS:
         try:
             logger.info(f"Trying model: {model}")
-            llm = GoogleGenerativeAI(
-                model=model,
-                google_api_key=api_key,
-                temperature=0.1,
-                max_retries=2,
-                request_timeout=30
-            )
+          llm = GoogleGenerativeAI(
+            model="gemini-2.5-flash", 
+            google_api_key=os.environ["GOOGLE_API_KEY"], 
+            temperature=0.1
+        )
+            
             return llm
         except Exception as e:
             last_error = e

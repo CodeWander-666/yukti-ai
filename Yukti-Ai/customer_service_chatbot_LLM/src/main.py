@@ -5,7 +5,7 @@ from langchain_core.documents import Document
 from langchain_community.vectorstores import FAISS
 from langchain_helper import get_qa_chain, get_embeddings, VECTORDB_PATH, BASE_DIR
 
-# ---------- Configuration ----------
+# ---------- Page Configuration ----------
 st.set_page_config(
     page_title="Yukti AI",
     page_icon="✨",
@@ -13,7 +13,7 @@ st.set_page_config(
     initial_sidebar_state="expanded"
 )
 
-# ---------- Custom CSS for Professional Look ----------
+# ---------- Custom CSS for Professional Look (No Emojis) ----------
 st.markdown("""
 <style>
     /* Main container */
@@ -149,16 +149,16 @@ def rebuild_knowledge_base():
 with st.sidebar:
     st.header("Knowledge Base")
     
-    if st.button("🔄 Update Knowledge Base", use_container_width=True):
+    if st.button("Update Knowledge Base", use_container_width=True):
         rebuild_knowledge_base()
     
     st.divider()
     
     st.subheader("Status")
     if st.session_state.knowledge_base_ready:
-        st.markdown("✅ **Active**")
+        st.markdown("**Active**")
     else:
-        st.markdown("❌ **Not built** – click update above.")
+        st.markdown("**Not built** – click update above.")
     
     st.divider()
     
@@ -168,7 +168,7 @@ with st.sidebar:
     
     st.divider()
     
-    if st.button("🗑️ Clear Conversation", use_container_width=True):
+    if st.button("Clear Conversation", use_container_width=True):
         st.session_state.messages = [
             {"role": "assistant", "content": "Hello! I'm Yukti AI. How can I help you today?"}
         ]
@@ -179,14 +179,6 @@ with st.sidebar:
 for msg in st.session_state.messages:
     with st.chat_message(msg["role"]):
         st.markdown(msg["content"])
-        # Show source documents if available (for assistant messages)
-        if msg["role"] == "assistant" and "sources" in msg:
-            with st.expander("View source documents"):
-                for i, doc in enumerate(msg["sources"]):
-                    st.markdown(f"**Source {i+1}:**")
-                    st.write(doc.page_content)
-                    if i < len(msg["sources"]) - 1:
-                        st.divider()
 
 # Chat input
 if prompt := st.chat_input("Ask me anything..."):
@@ -194,43 +186,32 @@ if prompt := st.chat_input("Ask me anything..."):
     st.session_state.messages.append({"role": "user", "content": prompt})
     with st.chat_message("user"):
         st.markdown(prompt)
-    
-    # Generate response
+
+    # Generate response using thinking engine
     with st.chat_message("assistant"):
         response_placeholder = st.empty()
         full_response = ""
-        sources = []
-        
+
         try:
             if not st.session_state.knowledge_base_ready:
                 full_response = "The knowledge base is not ready. Please click 'Update Knowledge Base' in the sidebar first."
             else:
-                chain = get_qa_chain()
-                result = chain.invoke({"input": prompt})
-                full_response = result.get("answer", "I'm sorry, I couldn't generate an answer.")
-                sources = result.get("context", [])
-            
+                from think import think
+                # Prepare conversation history (last 10 messages)
+                history = [
+                    {"role": msg["role"], "content": msg["content"]}
+                    for msg in st.session_state.messages[-10:]
+                ]
+                full_response = think(prompt, history)
+
             response_placeholder.markdown(full_response)
-            
-            # Show sources if any
-            if sources:
-                with st.expander("View source documents"):
-                    for i, doc in enumerate(sources):
-                        st.markdown(f"**Source {i+1}:**")
-                        st.write(doc.page_content)
-                        if i < len(sources) - 1:
-                            st.divider()
-            
+
         except FileNotFoundError as e:
             full_response = "The knowledge base is not ready. Please click 'Update Knowledge Base' in the sidebar first."
             response_placeholder.markdown(full_response)
         except Exception as e:
             full_response = f"An error occurred: {e}"
             response_placeholder.markdown(full_response)
-    
+
     # Save assistant message
-    st.session_state.messages.append({
-        "role": "assistant",
-        "content": full_response,
-        "sources": sources
-    })
+    st.session_state.messages.append({"role": "assistant", "content": full_response})

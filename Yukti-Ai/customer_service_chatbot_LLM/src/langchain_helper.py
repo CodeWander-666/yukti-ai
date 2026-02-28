@@ -1,8 +1,3 @@
-"""
-Yukti AI – LangChain Helper Module
-Optimized for speed: singleton embeddings, connection reuse, concise prompts.
-"""
-
 import os
 import logging
 from functools import lru_cache
@@ -70,8 +65,6 @@ def get_llm():
                 max_retries=2,
                 request_timeout=30
             )
-            # Quick test call (optional, remove in production if not needed)
-            # llm.invoke("test")
             logger.info(f"Using model: {model}")
             return llm
         except Exception as e:

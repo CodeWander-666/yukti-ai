@@ -2,7 +2,7 @@ from langchain_community.vectorstores import FAISS
 from langchain_community.llms import GooglePalm
 from langchain_community.document_loaders import CSVLoader
 from langchain_community.embeddings import HuggingFaceInstructEmbeddings
-from langchain_core.prompts import PromptTemplate          # <-- use langchain_core
+from langchain_core.prompts import PromptTemplate   # ← only this line changed
 from langchain.chains import RetrievalQA
 import os
 

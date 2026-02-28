@@ -14,19 +14,37 @@ SOURCES = [
         "columns": ["prompt", "response"],
         "content_template": "Q: {prompt}\nA: {response}"
     },
-    # Add more CSV files here as needed
-    # {
-    #     "type": "csv",
-    #     "path": os.path.join(BASE_DIR, "dataset", "faq.csv"),
-    #     "name": "FAQ",
-    #     "columns": ["prompt", "response"],
-    #     "content_template": "Q: {prompt}\nA: {response}"
-    # },
 ]
+
+# ---------- Custom CSS for modern look ----------
+st.set_page_config(page_title="Yukti AI - Customer Service Chatbot", page_icon="AI", layout="wide")
+st.markdown("""
+<style>
+    .stTextInput > div > div > input {
+        font-size: 18px;
+        padding: 12px;
+    }
+    .stButton > button {
+        background-color: #4CAF50;
+        color: white;
+        font-size: 16px;
+        border-radius: 8px;
+        padding: 10px 24px;
+        transition: 0.3s;
+    }
+    .stButton > button:hover {
+        background-color: #45a049;
+    }
+    .stAlert {
+        border-radius: 8px;
+    }
+</style>
+""", unsafe_allow_html=True)
+
+st.title("Yukti Customer Service Chatbot")
 
 # ---------- Helper Functions ----------
 def load_all_documents():
-    """Load and combine documents from all sources."""
     docs = []
     for src in SOURCES:
         if src["type"] == "csv":
@@ -35,7 +53,6 @@ def load_all_documents():
                 st.warning(f" File not found: {path}")
                 continue
             try:
-                # Try multiple encodings (for Windows-1252 files)
                 encodings = ['utf-8', 'cp1252', 'latin-1', 'iso-8859-1']
                 df = None
                 for enc in encodings:
@@ -47,13 +64,10 @@ def load_all_documents():
                 if df is None:
                     st.error(f"Could not read {path} with any encoding.")
                     return None
-                
-                # Check required columns
                 missing = [c for c in src["columns"] if c not in df.columns]
                 if missing:
                     st.error(f"Missing columns {missing} in {path}")
                     return None
-                
                 for idx, row in df.iterrows():
                     content = src["content_template"].format(**{c: row[c] for c in src["columns"]})
                     docs.append(Document(
@@ -67,7 +81,6 @@ def load_all_documents():
     return docs
 
 def rebuild_knowledge_base():
-    """Rebuild FAISS index from all sources."""
     with st.spinner("📥 Loading documents..."):
         docs = load_all_documents()
         if docs is None:
@@ -75,7 +88,6 @@ def rebuild_knowledge_base():
         if not docs:
             st.warning("No documents found.")
             return False
-    
     with st.spinner(" Generating embeddings and building index..."):
         try:
             embeddings = get_embeddings()
@@ -84,39 +96,39 @@ def rebuild_knowledge_base():
             st.success(f" Knowledge base rebuilt with {len(docs)} documents!")
             return True
         except Exception as e:
-            st.error(f"❌ Build failed: {e}")
+            st.error(f" Build failed: {e}")
             return False
 
-# ---------- Streamlit UI ----------
-st.set_page_config(page_title="Customer Service Chatbot", page_icon="AI", layout="wide")
-st.title("Yukti AI - Chatbot with Dynamic Knowledge")
-
-# Sidebar
+# ---------- Sidebar ----------
 with st.sidebar:
-    st.header("⚙️ Admin Panel")
-    if st.button("🔄 Update Knowledge Base", use_container_width=True):
+    st.header(" Admin Panel")
+    if st.button(" Update Knowledge Base", use_container_width=True):
         rebuild_knowledge_base()
-    
     st.divider()
     st.caption(" Data Sources")
     for src in SOURCES:
         st.write(f"- {src['name']}")
-    
-    st.divider()
-    st.caption(" Info")
-    st.write("Click **Update Knowledge Base** after adding new sources.")
 
-# Main chat area
-question = st.text_input("💬 Ask a question:", placeholder="Type your question here...")
+# ---------- Main Chat ----------
+question = st.text_input(" Ask a question:", placeholder="Type your question here...")
 
 if question:
     with st.spinner(" Thinking..."):
         try:
             chain = get_qa_chain()
             response = chain.invoke({"input": question})
-            st.header("Ans wer")
+            
+            st.header(" Answer")
             st.write(response["answer"])
+            
+            # Show source documents
+            if "context" in response and response["context"]:
+                with st.expander(" Source Documents"):
+                    for i, doc in enumerate(response["context"]):
+                        st.markdown(f"**Source {i+1}:**")
+                        st.write(doc.page_content)
+                        st.divider()
         except FileNotFoundError as e:
-            st.warning(f"{e}\n\nClick **'Update Knowledge Base'** in the sidebar to create it.")
+            st.warning(f" {e}\n\nClick **'Update Knowledge Base'** in the sidebar to create it.")
         except Exception as e:
             st.error(f" An error occurred: {e}")

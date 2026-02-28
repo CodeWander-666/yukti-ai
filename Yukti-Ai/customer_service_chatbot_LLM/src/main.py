@@ -17,7 +17,7 @@ SOURCES = [
 ]
 
 # ---------- Custom CSS for modern look ----------
-st.set_page_config(page_title="Yukti AI - Customer Service Chatbot", page_icon="AI", layout="wide")
+st.set_page_config(page_title="Customer Service Chatbot", page_icon="🤖", layout="wide")
 st.markdown("""
 <style>
     .stTextInput > div > div > input {
@@ -41,7 +41,7 @@ st.markdown("""
 </style>
 """, unsafe_allow_html=True)
 
-st.title("Yukti Customer Service Chatbot")
+st.title("🤖 Customer Service Chatbot")
 
 # ---------- Helper Functions ----------
 def load_all_documents():
@@ -50,9 +50,10 @@ def load_all_documents():
         if src["type"] == "csv":
             path = src["path"]
             if not os.path.exists(path):
-                st.warning(f" File not found: {path}")
+                st.warning(f"⚠️ File not found: {path}")
                 continue
             try:
+                # Try multiple encodings (for Windows-1252 files)
                 encodings = ['utf-8', 'cp1252', 'latin-1', 'iso-8859-1']
                 df = None
                 for enc in encodings:
@@ -74,7 +75,7 @@ def load_all_documents():
                         page_content=content,
                         metadata={"source": path, "row": idx}
                     ))
-                st.success(f" Loaded {len(df)} rows from {src['name']}")
+                st.success(f"✅ Loaded {len(df)} rows from {src['name']}")
             except Exception as e:
                 st.error(f"Error reading {path}: {e}")
                 return None
@@ -88,29 +89,29 @@ def rebuild_knowledge_base():
         if not docs:
             st.warning("No documents found.")
             return False
-    with st.spinner(" Generating embeddings and building index..."):
+    with st.spinner("🧠 Generating embeddings and building index..."):
         try:
             embeddings = get_embeddings()
             vectordb = FAISS.from_documents(docs, embeddings)
             vectordb.save_local(VECTORDB_PATH)
-            st.success(f" Knowledge base rebuilt with {len(docs)} documents!")
+            st.success(f"✅ Knowledge base rebuilt with {len(docs)} documents!")
             return True
         except Exception as e:
-            st.error(f" Build failed: {e}")
+            st.error(f"❌ Build failed: {e}")
             return False
 
 # ---------- Sidebar ----------
 with st.sidebar:
-    st.header(" Admin Panel")
-    if st.button(" Update Knowledge Base", use_container_width=True):
+    st.header("⚙️ Admin Panel")
+    if st.button("🔄 Update Knowledge Base", use_container_width=True):
         rebuild_knowledge_base()
     st.divider()
-    st.caption(" Data Sources")
+    st.caption("📁 Data Sources")
     for src in SOURCES:
         st.write(f"- {src['name']}")
 
 # ---------- Main Chat ----------
-question = st.text_input(" Ask a question:", placeholder="Type your question here...")
+question = st.text_input("💬 Ask a question:", placeholder="Type your question here...")
 
 if question:
     with st.spinner(" Thinking..."):
@@ -118,17 +119,17 @@ if question:
             chain = get_qa_chain()
             response = chain.invoke({"input": question})
             
-            st.header(" Answer")
+            st.header("📝 Answer")
             st.write(response["answer"])
             
             # Show source documents
             if "context" in response and response["context"]:
-                with st.expander(" Source Documents"):
+                with st.expander("📚 Source Documents"):
                     for i, doc in enumerate(response["context"]):
                         st.markdown(f"**Source {i+1}:**")
                         st.write(doc.page_content)
                         st.divider()
         except FileNotFoundError as e:
-            st.warning(f" {e}\n\nClick **'Update Knowledge Base'** in the sidebar to create it.")
+            st.warning(f"⚠️ {e}\n\nClick **'Update Knowledge Base'** in the sidebar to create it.")
         except Exception as e:
-            st.error(f" An error occurred: {e}")
+            st.error(f"❌ An error occurred: {e}")

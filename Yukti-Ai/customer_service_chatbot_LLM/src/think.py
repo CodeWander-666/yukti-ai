@@ -1,8 +1,3 @@
-"""
-Yukti AI – Advanced Thinking Engine (The Brain)
-Human‑like reasoning with emotional awareness, self‑questioning, memory, and structured output.
-"""
-
 import logging
 import time
 import hashlib
@@ -16,13 +11,22 @@ from model_manager import load_model, get_model_config
 logger = logging.getLogger(__name__)
 
 # ----------------------------------------------------------------------
-# Conversation Memory (stores recent exchanges and a running summary)
+# In‑memory caches (to avoid repeated LLM calls and retrievals)
+# ----------------------------------------------------------------------
+_query_expansion_cache = {}       # original_query -> list of expanded queries
+_retrieval_cache = {}              # query_hash -> list of Documents
+CACHE_TTL = 3600                    # seconds (1 hour)
+
+def _cache_key(query: str) -> str:
+    return hashlib.md5(query.encode()).hexdigest()
+
+# ----------------------------------------------------------------------
+# Conversation Memory (stores recent exchanges)
 # ----------------------------------------------------------------------
 class ConversationMemory:
     def __init__(self, max_history: int = 10):
         self.history = []
         self.max_history = max_history
-        self.summary = ""
 
     def add_exchange(self, user: str, assistant: str):
         self.history.append({"user": user, "assistant": assistant})
@@ -36,11 +40,6 @@ class ConversationMemory:
             lines.append(f"User: {turn['user']}")
             lines.append(f"Yukti: {turn['assistant']}")
         return "\n".join(lines)
-
-    def update_summary(self, llm, query: str, answer: str):
-        """Generate or update a running summary of the conversation (optional)."""
-        # For now, we skip to keep speed; could be implemented if needed.
-        pass
 
 # ----------------------------------------------------------------------
 # Emotional tone detection (simple keyword‑based)
@@ -62,7 +61,11 @@ def detect_emotion(text: str) -> str:
 # Query expansion – generate multiple related questions
 # ----------------------------------------------------------------------
 def expand_query(original_query: str, llm) -> List[str]:
-    """Generate 3 alternative phrasings of the query to broaden retrieval."""
+    """Generate 3 alternative phrasings of the query (cached)."""
+    # Check cache
+    if original_query in _query_expansion_cache:
+        return _query_expansion_cache[original_query]
+
     prompt = f"""Given the user's question, generate 3 different ways to ask the same question.
 These will be used to search a knowledge base. Return each on a new line, no numbering.
 
@@ -71,20 +74,31 @@ Original question: {original_query}
 Alternative phrasings:"""
     try:
         response = llm.invoke(prompt)
-        alternatives = [line.strip() for line in response.split("\n") if line.strip()]
-        return [original_query] + alternatives[:3]
+        # Extract content from AIMessage
+        text = response.content if hasattr(response, 'content') else str(response)
+        alternatives = [line.strip() for line in text.split("\n") if line.strip()]
+        result = [original_query] + alternatives[:3]
+        _query_expansion_cache[original_query] = result
+        return result
     except Exception as e:
         logger.warning(f"Query expansion failed: {e}")
         return [original_query]
 
 # ----------------------------------------------------------------------
-# Retrieve and merge documents from multiple queries with optional re‑ranking
+# Retrieve and merge documents from multiple queries (with caching)
 # ----------------------------------------------------------------------
 def retrieve_diverse(query: str, llm, k: int = 3) -> List[Document]:
     """
-    Expand query, retrieve for each variant in parallel, deduplicate, and re‑rank.
+    Expand query, retrieve for each variant in parallel, deduplicate, and optionally re‑rank.
     Returns a diverse set of relevant documents.
     """
+    cache_key = _cache_key(query)
+    # Check retrieval cache
+    cached = _retrieval_cache.get(cache_key)
+    if cached and (time.time() - cached['timestamp']) < CACHE_TTL:
+        logger.info("Retrieval cache hit")
+        return cached['docs']
+
     expanded = expand_query(query, llm)
 
     all_docs = []
@@ -106,13 +120,22 @@ def retrieve_diverse(query: str, llm, k: int = 3) -> List[Document]:
     # Optional re‑ranking with cross‑encoder
     cross_encoder = get_cross_encoder()
     if cross_encoder and all_docs:
-        pairs = [[query, doc.page_content] for doc in all_docs]
-        scores = cross_encoder.predict(pairs)
-        scored = sorted(zip(all_docs, scores), key=lambda x: x[1], reverse=True)
-        all_docs = [doc for doc, _ in scored[:k*2]]
+        try:
+            pairs = [[query, doc.page_content] for doc in all_docs]
+            scores = cross_encoder.predict(pairs)
+            scored = sorted(zip(all_docs, scores), key=lambda x: x[1], reverse=True)
+            all_docs = [doc for doc, _ in scored[:k*2]]
+        except Exception as e:
+            logger.warning(f"Re‑ranking failed, using basic retrieval: {e}")
+            all_docs = all_docs[:k*2]
     else:
         all_docs = all_docs[:k*2]
 
+    # Store in cache
+    _retrieval_cache[cache_key] = {
+        'docs': all_docs,
+        'timestamp': time.time()
+    }
     return all_docs
 
 # ----------------------------------------------------------------------
@@ -141,7 +164,8 @@ Answer 2: ...
 """
     try:
         response = llm.invoke(prompt)
-        return response.strip()
+        # Extract content from AIMessage
+        return response.content if hasattr(response, 'content') else str(response)
     except Exception as e:
         logger.warning(f"Self‑questioning failed: {e}")
         return ""
@@ -255,6 +279,8 @@ ANSWER:
 """
     try:
         full_response = llm.invoke(reasoning_prompt)
+        # Extract content from AIMessage
+        full_text = full_response.content if hasattr(full_response, 'content') else str(full_response)
     except Exception as e:
         logger.exception("LLM invocation failed")
         return {
@@ -267,9 +293,9 @@ ANSWER:
 
     # Extract monologue and answer
     monologue = ""
-    answer = full_response
-    if "MONOLOGUE:" in full_response and "ANSWER:" in full_response:
-        parts = full_response.split("MONOLOGUE:", 1)[1]
+    answer = full_text
+    if "MONOLOGUE:" in full_text and "ANSWER:" in full_text:
+        parts = full_text.split("MONOLOGUE:", 1)[1]
         if "ANSWER:" in parts:
             monologue, answer = parts.split("ANSWER:", 1)
             monologue = monologue.strip()

@@ -1,6 +1,6 @@
 """
 Yukti AI – LangChain Helper Module
-Optimized for speed: singleton embeddings, fast model, efficient retrieval.
+Optimized for speed: singleton embeddings, connection reuse, concise prompts.
 """
 
 import os
@@ -8,7 +8,6 @@ import logging
 from functools import lru_cache
 from dotenv import load_dotenv
 
-# LangChain imports
 from langchain_community.vectorstores import FAISS
 from langchain_community.document_loaders import CSVLoader
 from langchain_community.embeddings import HuggingFaceInstructEmbeddings
@@ -17,7 +16,6 @@ from langchain_google_genai import GoogleGenerativeAI
 from langchain_classic.chains import create_retrieval_chain
 from langchain_classic.chains.combine_documents import create_stuff_documents_chain
 
-# Load environment variables
 load_dotenv()
 logger = logging.getLogger(__name__)
 
@@ -72,9 +70,9 @@ def get_llm():
                 max_retries=2,
                 request_timeout=30
             )
-            # Optional: quick test call (disable in production if not needed)
+            # Quick test call (optional, remove in production if not needed)
             # llm.invoke("test")
-            logger.info(f"✅ Using model: {model}")
+            logger.info(f"Using model: {model}")
             return llm
         except Exception as e:
             last_error = e
@@ -138,10 +136,20 @@ Question: {input}""",
     return chain
 
 # ----------------------------------------------------------------------
+# Retrieval function for thinking engine
+# ----------------------------------------------------------------------
+def retrieve_documents(query: str, k: int = 5):
+    """Retrieve top k relevant documents from the knowledge base."""
+    if not os.path.exists(VECTORDB_PATH):
+        raise FileNotFoundError("Knowledge base not found.")
+    embeddings = get_embeddings()
+    vectordb = FAISS.load_local(VECTORDB_PATH, embeddings, allow_dangerous_deserialization=True)
+    return vectordb.similarity_search(query, k=k)
+
+# ----------------------------------------------------------------------
 # For standalone testing (optional)
 # ----------------------------------------------------------------------
 if __name__ == "__main__":
-    # Test the chain
     try:
         chain = get_qa_chain()
         response = chain.invoke({"input": "What is this course about?"})

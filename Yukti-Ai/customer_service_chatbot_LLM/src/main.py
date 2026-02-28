@@ -1,67 +1,95 @@
 """
 Yukti AI – Main Application
-Ultra‑robust import handling with fallbacks and debug info.
+Orchestrates all components with lightning speed, professional UI, and bulletproof error handling.
 """
 
 import os
-import sys
 import time
-from pathlib import Path
-
-# ---------- Force project root into path ----------
-PROJECT_ROOT = Path(__file__).parent.parent.parent.parent  # /mount/src/yukti-ai/
-if str(PROJECT_ROOT) not in sys.path:
-    sys.path.insert(0, str(PROJECT_ROOT))
-
 import streamlit as st
 import pandas as pd
 from langchain_core.documents import Document
 from langchain_community.vectorstores import FAISS
 
-# ---------- Conditional import of Zhipu TaskQueue ----------
-try:
-    from LLM.zhipu.queue_manager import TaskQueue
-    ZHIPU_AVAILABLE = True
-    st.sidebar.success("✅ Zhipu async tasks loaded")
-except ImportError as e:
-    # If import fails, create a dummy TaskQueue that does nothing
-    class TaskQueue:
-        def __init__(self, db_path=None):
-            self.conn = None
-        def get_active_tasks(self):
-            return []
-        def submit_async(self, *args, **kwargs):
-            raise RuntimeError("Async tasks not available (Zhipu import failed)")
-    ZHIPU_AVAILABLE = False
-    st.sidebar.warning(f"⚠️ Zhipu import failed: {e}. Async tasks disabled.")
-
-# ---------- Local imports (safe after path set) ----------
+# ---------- Local imports (must be in same directory) ----------
 from langchain_helper import get_embeddings, VECTORDB_PATH, BASE_DIR, create_vector_db
 from think import think
-from model_manager import get_available_models, MODELS
+from model_manager import (
+    get_available_models,
+    MODELS,
+    get_active_tasks,
+    get_task_status,
+    ZHIPU_AVAILABLE,
+)
 
-# ---------- Page config ----------
-st.set_page_config(page_title="Yukti AI", page_icon="✨", layout="wide")
+# ---------- Page configuration (MUST be first Streamlit command) ----------
+st.set_page_config(
+    page_title="Yukti AI",
+    page_icon="✨",
+    layout="wide",
+    initial_sidebar_state="expanded"
+)
 
-# Custom CSS (same as before)
+# ---------- Custom CSS for a clean, professional look ----------
 st.markdown("""
 <style>
-    .stChatMessage { border-radius: 12px; padding: 1rem; }
-    .stChatMessage[data-testid="user-message"] { background-color: #f0f2f6; }
-    .stChatMessage[data-testid="assistant-message"] { background-color: #e3f2fd; border-left: 4px solid #1976d2; }
-    .stButton > button { border-radius: 8px; font-weight: 500; }
-    .stTextInput > div > div > input { border-radius: 24px; border: 1px solid #ddd; padding: 12px 20px; }
+    /* Main container */
+    .main > div {
+        padding: 0 2rem;
+    }
+    /* Chat message styling */
+    .stChatMessage {
+        border-radius: 12px;
+        padding: 1rem;
+        margin-bottom: 0.5rem;
+    }
+    .stChatMessage[data-testid="user-message"] {
+        background-color: #f0f2f6;
+    }
+    .stChatMessage[data-testid="assistant-message"] {
+        background-color: #e3f2fd;
+        border-left: 4px solid #1976d2;
+    }
+    /* Sidebar styling */
+    .css-1d391kg {
+        background-color: #f8f9fa;
+    }
+    /* Buttons */
+    .stButton > button {
+        border-radius: 8px;
+        font-weight: 500;
+        transition: all 0.2s;
+    }
+    .stButton > button:hover {
+        transform: translateY(-1px);
+        box-shadow: 0 4px 8px rgba(0,0,0,0.1);
+    }
+    /* Input field */
+    .stTextInput > div > div > input {
+        border-radius: 24px;
+        border: 1px solid #ddd;
+        padding: 12px 20px;
+        font-size: 16px;
+    }
+    /* Headers */
+    h1, h2, h3 {
+        font-family: 'Inter', sans-serif;
+        font-weight: 500;
+    }
+    /* Hide Streamlit branding */
     #MainMenu {visibility: hidden;}
     footer {visibility: hidden;}
 </style>
 """, unsafe_allow_html=True)
 
+# ---------- Title and subtitle ----------
 st.title("Yukti AI")
 st.caption("Your Intelligent Assistant – Powered by Zhipu GLM & Gemini")
 
-# ---------- Session state ----------
+# ---------- Session state initialization ----------
 if "messages" not in st.session_state:
-    st.session_state.messages = [{"role": "assistant", "content": "Hello! I'm Yukti AI. How can I help you today?"}]
+    st.session_state.messages = [
+        {"role": "assistant", "content": "Hello! I'm Yukti AI. How can I help you today?"}
+    ]
 if "knowledge_base_ready" not in st.session_state:
     st.session_state.knowledge_base_ready = os.path.exists(VECTORDB_PATH)
 if "show_thinking" not in st.session_state:
@@ -76,7 +104,9 @@ SOURCES = [{
     "content_template": "Q: {prompt}\nA: {response}"
 }]
 
+# ---------- Helper functions ----------
 def load_all_documents():
+    """Load documents from all sources with robust encoding handling."""
     docs = []
     for src in SOURCES:
         if src["type"] == "csv":
@@ -85,6 +115,7 @@ def load_all_documents():
                 st.sidebar.warning(f"File not found: {path}")
                 continue
             try:
+                # Try multiple encodings
                 encodings = ['utf-8', 'cp1252', 'latin-1', 'iso-8859-1']
                 df = None
                 for enc in encodings:
@@ -96,13 +127,17 @@ def load_all_documents():
                 if df is None:
                     st.sidebar.error(f"Cannot read {path}")
                     return None
+                # Check required columns
                 missing = [c for c in src["columns"] if c not in df.columns]
                 if missing:
                     st.sidebar.error(f"Missing columns {missing} in {path}")
                     return None
                 for idx, row in df.iterrows():
                     content = src["content_template"].format(**{c: row[c] for c in src["columns"]})
-                    docs.append(Document(page_content=content, metadata={"source": path, "row": idx}))
+                    docs.append(Document(
+                        page_content=content,
+                        metadata={"source": path, "row": idx}
+                    ))
                 st.sidebar.success(f"Loaded {len(df)} rows from {src['name']}")
             except Exception as e:
                 st.sidebar.error(f"Error reading {path}: {e}")
@@ -110,6 +145,7 @@ def load_all_documents():
     return docs
 
 def rebuild_knowledge_base():
+    """Rebuild FAISS index from all sources."""
     with st.spinner("Loading documents..."):
         docs = load_all_documents()
         if docs is None:
@@ -130,6 +166,7 @@ def rebuild_knowledge_base():
             return False
 
 def stream_response(placeholder, full_text, delay=0.02):
+    """Simulate letter‑by‑letter streaming."""
     words = full_text.split()
     current = ""
     for word in words:
@@ -144,6 +181,7 @@ with st.sidebar:
     if st.button("Update Knowledge Base", use_container_width=True):
         rebuild_knowledge_base()
     st.divider()
+
     st.subheader("Status")
     if st.session_state.knowledge_base_ready:
         st.markdown("**Active**")
@@ -166,13 +204,12 @@ with st.sidebar:
     st.session_state.show_thinking = st.checkbox("Show thinking process", value=True)
     st.divider()
 
-    # ---------- Task Monitor (only if Zhipu available) ----------
+    # ---------- Task Monitor (only if Zhipu async models are available) ----------
     if ZHIPU_AVAILABLE:
         st.subheader("📋 Active Tasks")
-        task_queue = TaskQueue(db_path=os.path.join(BASE_DIR, "yukti_tasks.db"))
-        if st.button("Refresh Tasks"):
+        if st.button("Refresh Tasks", use_container_width=True):
             st.rerun()
-        active = task_queue.get_active_tasks()
+        active = get_active_tasks()
         for task_id, variant, status, progress in active:
             with st.container():
                 st.markdown(f"**{variant}** ({task_id[:8]})")
@@ -182,14 +219,7 @@ with st.sidebar:
                     st.text("⏳ Queued")
                 else:
                     st.text(f"Status: {status}")
-        completed = task_queue.conn.execute(
-            "SELECT variant, result_url FROM tasks WHERE status='completed' ORDER BY completed_at DESC LIMIT 5"
-        ).fetchall()
-        if completed:
-            st.markdown("---")
-            st.markdown("✅ Recent Results")
-            for variant, url in completed:
-                st.markdown(f"- {variant}: [View]({url})")
+        # Optionally show recent completed tasks (we can add later)
         st.divider()
 
     st.subheader("Sources")
@@ -198,19 +228,25 @@ with st.sidebar:
     st.divider()
 
     if st.button("Clear Conversation", use_container_width=True):
-        st.session_state.messages = [{"role": "assistant", "content": "Hello! I'm Yukti AI. How can I help you today?"}]
+        st.session_state.messages = [
+            {"role": "assistant", "content": "Hello! I'm Yukti AI. How can I help you today?"}
+        ]
         st.rerun()
 
-# ---------- Chat interface ----------
+# ---------- Main chat interface ----------
+# Display message history
 for msg in st.session_state.messages:
     with st.chat_message(msg["role"]):
         st.markdown(msg["content"])
 
+# Chat input
 if prompt := st.chat_input("Ask me anything..."):
+    # Add user message
     st.session_state.messages.append({"role": "user", "content": prompt})
     with st.chat_message("user"):
         st.markdown(prompt)
 
+    # Generate response
     with st.chat_message("assistant"):
         response_placeholder = st.empty()
         try:
@@ -218,24 +254,29 @@ if prompt := st.chat_input("Ask me anything..."):
                 full_response = "The knowledge base is not ready. Please click 'Update Knowledge Base' in the sidebar first."
                 response_placeholder.markdown(full_response)
             else:
-                history = [{"role": msg["role"], "content": msg["content"]} for msg in st.session_state.messages[-10:]]
+                # Prepare conversation history (last 10 messages)
+                history = [
+                    {"role": msg["role"], "content": msg["content"]}
+                    for msg in st.session_state.messages[-10:]
+                ]
                 with st.spinner("Thinking..."):
                     result = think(prompt, history, st.session_state.selected_model)
 
+                # Handle async vs sync
                 if result.get("type") == "async":
-                    if not ZHIPU_AVAILABLE:
-                        full_response = "Async tasks are disabled because Zhipu is not available."
-                    else:
-                        task_id = result["task_id"]
-                        variant = result["variant"]
-                        full_response = f"🎨 **{variant} task started!**\n\nTask ID: `{task_id}`\n\nCheck progress in the sidebar."
+                    task_id = result["task_id"]
+                    variant = result["variant"]
+                    full_response = f"🎨 **{variant} task started!**\n\nTask ID: `{task_id}`\n\nCheck progress in the sidebar."
                     response_placeholder.markdown(full_response)
                 else:
+                    # Sync response: show thinking process if enabled
                     if st.session_state.show_thinking and result.get("monologue"):
                         with st.expander("Show thinking process"):
                             st.markdown(result["monologue"])
+                    # Stream answer letter‑by‑letter
                     answer = result.get("answer", "")
                     stream_response(response_placeholder, answer, delay=0.03)
+                    # Show sources if available
                     if result.get("sources"):
                         with st.expander("View source documents"):
                             for i, doc in enumerate(result["sources"][:3]):
@@ -243,10 +284,15 @@ if prompt := st.chat_input("Ask me anything..."):
                                 st.write(doc.page_content[:500] + "..." if len(doc.page_content) > 500 else doc.page_content)
                                 if i < len(result["sources"]) - 1:
                                     st.divider()
+                    # Show thinking time
                     st.caption(f"Thought for {result.get('thinking_time', 0):.2f}s")
+
         except Exception as e:
             st.error(f"An error occurred: {e}")
             full_response = ""
 
-    # Save assistant message
-    st.session_state.messages.append({"role": "assistant", "content": full_response if result.get("type")=="async" else answer})
+    # Save assistant message to history
+    if result.get("type") == "async":
+        st.session_state.messages.append({"role": "assistant", "content": full_response})
+    else:
+        st.session_state.messages.append({"role": "assistant", "content": answer})

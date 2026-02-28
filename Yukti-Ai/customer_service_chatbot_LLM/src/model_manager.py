@@ -18,9 +18,9 @@ from langchain_openai import ChatOpenAI
 # Attempt to import zai-sdk for async video (optional)
 try:
     from zai import ZhipuAiClient
-    ZAI_AVAILABLE = True
+    ZHIPU_AVAILABLE = True          # <-- renamed from ZAI_AVAILABLE
 except ImportError:
-    ZAI_AVAILABLE = False
+    ZHIPU_AVAILABLE = False
     logging.warning("zai-sdk not installed; video generation disabled.")
 
 logger = logging.getLogger(__name__)
@@ -77,7 +77,7 @@ def get_available_models() -> List[str]:
         if v.get("depends_on_zhipu", False):
             # For Zhipu models, we need an API key.
             if os.environ.get("ZHIPU_API_KEY") or st.secrets.get("ZHIPU_API_KEY"):
-                if v.get("requires_zai") and not ZAI_AVAILABLE:
+                if v.get("requires_zai") and not ZHIPU_AVAILABLE:   # <-- renamed
                     continue   # video requires zai-sdk
                 available.append(k)
         else:
@@ -108,7 +108,7 @@ def get_sync_client() -> Optional[ChatOpenAI]:
 # ----------------------------------------------------------------------
 # Async queue for video tasks using zai-sdk
 # ----------------------------------------------------------------------
-if ZAI_AVAILABLE:
+if ZHIPU_AVAILABLE:   # <-- renamed
     class ZhipuTaskQueue:
         def __init__(self, db_path: str = "yukti_tasks.db"):
             self.db_path = db_path
@@ -262,7 +262,7 @@ class YuktiModel:
     def invoke(self, prompt: str, **kwargs) -> Any:
         if self.config["type"] == "async":
             # Video only
-            if not ZAI_AVAILABLE:
+            if not ZHIPU_AVAILABLE:   # <-- renamed
                 raise RuntimeError("Video generation requires zai-sdk.")
             return _task_queue.submit_async(
                 variant=self.model_key,

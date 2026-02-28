@@ -39,7 +39,19 @@ def load_all_documents():
                 st.warning(f"Source file not found: {path}")
                 continue
             try:
-                df = pd.read_csv(path)
+                # Try multiple encodings
+                encodings = ['utf-8', 'latin-1', 'cp1252', 'iso-8859-1']
+                df = None
+                for enc in encodings:
+                    try:
+                        df = pd.read_csv(path, encoding=enc, on_bad_lines='skip')
+                        break
+                    except UnicodeDecodeError:
+                        continue
+                if df is None:
+                    st.error(f"Could not read {path} with any common encoding.")
+                    return None
+
                 # Check required columns
                 for col in src["columns"]:
                     if col not in df.columns:

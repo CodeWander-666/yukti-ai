@@ -1,7 +1,7 @@
 """
-Yukti AI – Model Manager (Stable Production Edition)
-Handles all Yukti services with concurrency‑aware model selection, proper audio via glm-4-voice,
-async video queue, and full compatibility with existing files.
+Yukti AI – Model Manager (Production Edition)
+Handles all Yukti services with concurrency‑aware model selection, Gemini 3 dynamic selection,
+async video queue, and full compatibility.
 """
 
 import logging
@@ -19,7 +19,6 @@ from typing import Dict, Any, Optional, List, Tuple
 import streamlit as st
 from langchain_openai import ChatOpenAI
 
-# Attempt to import zai-sdk for async video
 try:
     from zai import ZhipuAiClient
     ZAI_AVAILABLE = True
@@ -27,9 +26,9 @@ except ImportError:
     ZAI_AVAILABLE = False
     logging.warning("zai-sdk not installed; video generation disabled.")
 
-# Attempt to import Gemini SDK (optional – remove if not needed)
 try:
     from google import genai
+    from google.genai import types
     GEMINI_SDK_AVAILABLE = True
 except ImportError:
     GEMINI_SDK_AVAILABLE = False
@@ -37,108 +36,50 @@ except ImportError:
 
 logger = logging.getLogger(__name__)
 
-# ----------------------------------------------------------------------
-# Constants
-# ----------------------------------------------------------------------
-ZHIPU_BASE_URL = "https://open.bigmodel.cn/api/paas/v4"  # official endpoint
+ZHIPU_BASE_URL = "https://open.bigmodel.cn/api/paas/v4"
 
-# ----------------------------------------------------------------------
-# Individual Model Configurations (with concurrency limits)
-# ----------------------------------------------------------------------
 _MODEL_REGISTRY = {
-    # Text models (Zhipu)
-    "search-pro": {
-        "model_id": "search-pro",
+    "glm-4-flash": {
+        "model_id": "glm-4-flash",
         "provider": "zhipu",
         "type": "sync",
-        "concurrency_limit": 5,
-        "description": "Search enhanced text model"
-    },
-    "glm-realtime-air": {
-        "model_id": "glm-realtime-air",
-        "provider": "zhipu",
-        "type": "sync",
-        "concurrency_limit": 30,
-        "description": "Realtime air model"
-    },
-    "autoglm-phone-multilingual": {
-        "model_id": "autoglm-phone-multilingual",
-        "provider": "zhipu",
-        "type": "sync",
-        "concurrency_limit": 5,
-        "description": "AutoGLM phone multilingual"
+        "concurrency_limit": 200,
+        "description": "GLM-4 Flash (fast, high concurrency)"
     },
     "glm-4-plus": {
         "model_id": "glm-4-plus",
         "provider": "zhipu",
         "type": "sync",
         "concurrency_limit": 20,
-        "description": "GLM-4 Plus"
-    },
-    "glm-z1-airx": {
-        "model_id": "glm-z1-airx",
-        "provider": "zhipu",
-        "type": "sync",
-        "concurrency_limit": 30,
-        "description": "GLM-Z1 AirX"
-    },
-    "glm-4-flash": {
-        "model_id": "glm-4-flash",
-        "provider": "zhipu",
-        "type": "sync",
-        "concurrency_limit": 200,
-        "description": "GLM-4 Flash"
+        "description": "GLM-4 Plus (balanced)"
     },
     "glm-5": {
         "model_id": "glm-5",
         "provider": "zhipu",
         "type": "sync",
         "concurrency_limit": 3,
-        "description": "GLM-5 (deep research)"
-    },
-    "glm-z1-air": {
-        "model_id": "glm-z1-air",
-        "provider": "zhipu",
-        "type": "sync",
-        "concurrency_limit": 30,
-        "description": "GLM-Z1 Air"
-    },
-    # Image models
-    "cogview-4": {
-        "model_id": "cogview-4",
-        "provider": "zhipu",
-        "type": "sync",
-        "concurrency_limit": 5,
-        "description": "CogView-4"
-    },
-    "cogview-3-plus": {
-        "model_id": "cogview-3-plus",
-        "provider": "zhipu",
-        "type": "sync",
-        "concurrency_limit": 5,
-        "description": "CogView-3 Plus"
+        "description": "GLM-5 (deep reasoning)"
     },
     "cogview-3-flash": {
         "model_id": "cogview-3-flash",
         "provider": "zhipu",
         "type": "sync",
         "concurrency_limit": 10,
-        "description": "CogView-3 Flash"
+        "description": "CogView-3 Flash (fast image)"
     },
-    # Video models
+    "cogview-4": {
+        "model_id": "cogview-4",
+        "provider": "zhipu",
+        "type": "sync",
+        "concurrency_limit": 5,
+        "description": "CogView-4 (high quality)"
+    },
     "cogvideox-3": {
         "model_id": "cogvideox-3",
         "provider": "zhipu",
         "type": "async",
         "concurrency_limit": 5,
         "description": "CogVideoX-3"
-    },
-    "cogvideox-2": {
-        "model_id": "cogvideox-2",
-        "provider": "zhipu",
-        "type": "async",
-        "concurrency_limit": 5,
-        "description": "CogVideoX-2"
     },
     "cogvideox-flash": {
         "model_id": "cogvideox-flash",
@@ -147,63 +88,31 @@ _MODEL_REGISTRY = {
         "concurrency_limit": 3,
         "description": "CogVideoX Flash"
     },
-    # Audio model (updated to official glm-4-voice)
     "glm-4-voice": {
         "model_id": "glm-4-voice",
         "provider": "zhipu",
         "type": "sync",
-        "concurrency_limit": 5,   # based on V0 user rights
-        "description": "GLM-4 Voice (end‑to‑end speech)"
+        "concurrency_limit": 5,
+        "description": "GLM-4 Voice"
     },
-    # Gemini (optional – remove if not used)
-    "gemini-1.5-flash": {
-        "model_id": "gemini-1.5-flash",  # replace with valid model name
+    "gemini": {
+        "model_id": "gemini-dynamic",
         "provider": "gemini",
         "type": "sync",
         "concurrency_limit": 60,
-        "description": "Google Gemini 1.5 Flash"
+        "description": "Google Gemini (dynamic selection)"
     }
 }
 
-# ----------------------------------------------------------------------
-# Service priority lists (ordered from most powerful to least)
-# ----------------------------------------------------------------------
 SERVICES = {
-    "Yukti‑Flash": [
-        "search-pro",
-        "glm-realtime-air",
-        "autoglm-phone-multilingual",
-        "glm-4-plus",
-        "glm-z1-airx",
-        "glm-4-flash"
-    ],
-    "Yukti‑Quantum": [
-        "glm-5",
-        "glm-4-plus",
-        "glm-z1-air",
-        "glm-4-flash"
-    ],
-    "Yukti‑Image": [
-        "cogview-4",
-        "cogview-3-plus",
-        "cogview-3-flash"
-    ],
-    "Yukti‑Video": [
-        "cogvideox-3",
-        "cogvideox-2",
-        "cogvideox-flash"
-    ],
-    "Yukti‑Audio": [
-        "glm-4-voice"   # single model; if more are added, list them here
-    ],
-    "Gemini 1.5 Flash": [   # remove this service if not using Gemini
-        "gemini-1.5-flash"
-    ]
+    "Yukti‑Flash": ["glm-4-flash", "glm-4-plus"],
+    "Yukti‑Quantum": ["glm-5", "glm-4-plus"],
+    "Yukti‑Image": ["cogview-3-flash", "cogview-4"],
+    "Yukti‑Video": ["cogvideox-3", "cogvideox-flash"],
+    "Yukti‑Audio": ["glm-4-voice"],
+    "Gemini": ["gemini"]
 }
 
-# ----------------------------------------------------------------------
-# API Key Helpers
-# ----------------------------------------------------------------------
 def get_zhipu_api_key() -> Optional[str]:
     return st.secrets.get("ZHIPU_API_KEY") or os.getenv("ZHIPU_API_KEY")
 
@@ -213,9 +122,6 @@ def get_google_api_key() -> Optional[str]:
 ZHIPU_AVAILABLE = get_zhipu_api_key() is not None
 GEMINI_AVAILABLE = GEMINI_SDK_AVAILABLE and get_google_api_key() is not None
 
-# ----------------------------------------------------------------------
-# Concurrency Tracker (in‑memory with thread safety)
-# ----------------------------------------------------------------------
 class ConcurrencyTracker:
     def __init__(self):
         self.counters = {}
@@ -241,21 +147,6 @@ class ConcurrencyTracker:
 
 concurrency = ConcurrencyTracker()
 
-# ----------------------------------------------------------------------
-# Model Selector for a given service
-# ----------------------------------------------------------------------
-def select_model_for_service(service: str) -> str:
-    """Return the first available model key for the service based on concurrency."""
-    if service not in SERVICES:
-        raise ValueError(f"Unknown service: {service}")
-    for model_key in SERVICES[service]:
-        if concurrency.can_use(model_key):
-            return model_key
-    raise RuntimeError(f"No models available for service '{service}' (all at concurrency limit)")
-
-# ----------------------------------------------------------------------
-# Provider Clients
-# ----------------------------------------------------------------------
 class ZhipuClient:
     def __init__(self, api_key: str):
         self.api_key = api_key
@@ -266,13 +157,12 @@ class ZhipuClient:
         })
 
     def _request_with_retry(self, method: str, url: str, **kwargs) -> requests.Response:
-        """Make a request with exponential backoff retry (max 3 attempts)."""
         max_retries = 3
         for attempt in range(max_retries):
             try:
                 resp = self.session.request(method, url, **kwargs)
                 if resp.status_code == 429:
-                    wait = (2 ** attempt) + (0.5 * attempt)  # exponential backoff
+                    wait = (2 ** attempt) + (0.5 * attempt)
                     logger.warning(f"Rate limit hit, retrying in {wait:.2f}s")
                     time.sleep(wait)
                     continue
@@ -286,8 +176,6 @@ class ZhipuClient:
         raise RuntimeError("Max retries exceeded")
 
     def text(self, model: str, prompt: str, temperature: float = 0.1) -> str:
-        """Invoke a Zhipu text model via ChatOpenAI (uses requests under the hood)."""
-        # We use ChatOpenAI as before, but we'll rely on its own retry.
         llm = ChatOpenAI(
             model=model,
             api_key=self.api_key,
@@ -295,56 +183,42 @@ class ZhipuClient:
             temperature=temperature,
             max_retries=2,
         )
-        return llm.invoke(prompt).content
+        response = llm.invoke(prompt)
+        content = response.content if hasattr(response, 'content') else str(response)
+        if not content:
+            logger.warning("Empty response, retrying with higher temperature")
+            llm.temperature = 0.7
+            response2 = llm.invoke(prompt)
+            content2 = response2.content if hasattr(response2, 'content') else str(response2)
+            if content2:
+                return content2
+            return "(Empty response from model)"
+        return content
 
     def image(self, model: str, prompt: str) -> str:
-        """Generate an image and return its URL."""
         url = f"{ZHIPU_BASE_URL}/images/generations"
         payload = {"model": model, "prompt": prompt}
         resp = self._request_with_retry("POST", url, json=payload)
         return resp.json()["data"][0]["url"]
 
     def audio(self, model: str, prompt: str, voice: str = None) -> str:
-        """
-        Generate speech using glm-4-voice (chat‑based, returns base64 audio).
-        Saves audio to a temporary file and returns the path.
-        """
-        # For glm-4-voice, we use the chat completions endpoint with a special message.
         url = f"{ZHIPU_BASE_URL}/chat/completions"
-        # Prepare messages: text instruction (optional) and prompt as text.
-        # The model can accept text and produce audio. We'll send the prompt as text.
-        messages = [
-            {
-                "role": "user",
-                "content": [
-                    {"type": "text", "text": prompt}
-                ]
-            }
-        ]
-        payload = {
-            "model": model,
-            "messages": messages,
-            "temperature": 0.1,
-            "stream": False
-        }
+        messages = [{"role": "user", "content": [{"type": "text", "text": prompt}]}]
+        payload = {"model": model, "messages": messages, "temperature": 0.1, "stream": False}
         resp = self._request_with_retry("POST", url, json=payload)
         data = resp.json()
         try:
-            # The response contains audio data in base64 under choices[0].message.audio.data
             audio_b64 = data["choices"][0]["message"]["audio"]["data"]
             audio_bytes = base64.b64decode(audio_b64)
         except (KeyError, IndexError) as e:
             logger.error(f"Unexpected response format: {data}")
             raise RuntimeError("Audio generation failed: unexpected response format") from e
-
-        # Save to temporary file
         fd, path = tempfile.mkstemp(suffix=".wav", prefix="yukti_audio_")
         with os.fdopen(fd, "wb") as f:
             f.write(audio_bytes)
         return path
 
     def video_submit(self, model: str, prompt: str, **kwargs) -> str:
-        """Submit an async video generation task using zai-sdk."""
         if not ZAI_AVAILABLE:
             raise RuntimeError("Video generation requires zai-sdk.")
         from zai import ZhipuAiClient
@@ -363,7 +237,6 @@ class ZhipuClient:
         return response.id
 
     def video_poll(self, task_id: str) -> dict:
-        """Poll video task status using zai-sdk."""
         from zai import ZhipuAiClient
         client = ZhipuAiClient(api_key=self.api_key)
         return client.videos.retrieve_videos_result(task_id)
@@ -371,22 +244,61 @@ class ZhipuClient:
 class GeminiClient:
     def __init__(self, api_key: str):
         self.client = genai.Client(api_key=api_key)
+        self._available_models = None
+        self._selected_model = None
 
-    def text(self, model: str, prompt: str, temperature: float = 0.1) -> str:
+    def _get_available_models(self) -> List[str]:
+        if self._available_models is None:
+            try:
+                models = self.client.models.list()
+                self._available_models = [
+                    m.name for m in models 
+                    if 'generateContent' in (getattr(m, 'supported_actions', []) or [])
+                ]
+                logger.info(f"Available Gemini models: {self._available_models}")
+            except Exception as e:
+                logger.exception("Failed to list Gemini models")
+                self._available_models = []
+        return self._available_models
+
+    def _select_model(self) -> str:
+        preferred = [
+            "gemini-3.1-pro-preview",
+            "gemini-3-flash-preview",
+            "gemini-2.5-flash",
+            "gemini-1.5-flash",
+        ]
+        available = self._get_available_models()
+        if not available:
+            raise RuntimeError("No Gemini models available")
+        for pref in preferred:
+            for av in available:
+                if av.endswith(pref) or av == pref or av == f"models/{pref}":
+                    logger.info(f"Selected Gemini model: {av}")
+                    return av
+        logger.warning(f"None of {preferred} found, using first available: {available[0]}")
+        return available[0]
+
+    def text(self, prompt: str, temperature: float = 0.1) -> str:
+        if self._selected_model is None:
+            self._selected_model = self._select_model()
         try:
             response = self.client.models.generate_content(
-                model=model,
+                model=self._selected_model,
                 contents=prompt,
-                config={"temperature": temperature}
+                config=types.GenerateContentConfig(
+                    temperature=temperature,
+                    max_output_tokens=2048
+                )
             )
             return response.text
         except Exception as e:
             logger.exception("Gemini invocation failed")
+            if "404" in str(e) and self._selected_model != self._select_model():
+                self._selected_model = None
+                return self.text(prompt, temperature)
             raise RuntimeError(f"Gemini error: {e}")
 
-# ----------------------------------------------------------------------
-# Async Task Queue for Video
-# ----------------------------------------------------------------------
 if ZAI_AVAILABLE and ZHIPU_AVAILABLE:
     class ZhipuTaskQueue:
         def __init__(self, db_path: str = "yukti_tasks.db"):
@@ -394,7 +306,7 @@ if ZAI_AVAILABLE and ZHIPU_AVAILABLE:
             self.conn = sqlite3.connect(db_path, check_same_thread=False)
             self._init_db()
             self.lock = threading.Lock()
-            self.zhipu_map: Dict[str, str] = {}  # local_task_id -> zhipu_task_id
+            self.zhipu_map: Dict[str, str] = {}
             self._start_poller()
 
         def _init_db(self):
@@ -452,15 +364,13 @@ if ZAI_AVAILABLE and ZHIPU_AVAILABLE:
             return cursor.fetchall()
 
         def submit_async(self, variant: str, model: str, prompt: str, **kwargs) -> str:
-            """Submit an async video generation task using zai-sdk."""
             local_id = f"{variant}_{int(time.time())}_{abs(hash(prompt)) % 10000}"
             self.add_task(local_id, variant, model)
-
             try:
                 api_key = get_zhipu_api_key()
                 if not api_key:
                     raise RuntimeError("Zhipu API key not configured.")
-                client = ZhipuClient(api_key)  # reuse our client
+                client = ZhipuClient(api_key)
                 zhipu_task_id = client.video_submit(model, prompt, **kwargs)
                 with self.lock:
                     self.zhipu_map[local_id] = zhipu_task_id
@@ -471,7 +381,6 @@ if ZAI_AVAILABLE and ZHIPU_AVAILABLE:
             return local_id
 
         def _poll_tasks(self):
-            """Background thread polling all pending video tasks."""
             while True:
                 tasks = []
                 with self.lock:
@@ -479,8 +388,6 @@ if ZAI_AVAILABLE and ZHIPU_AVAILABLE:
                 for local_id, zhipu_id in tasks:
                     try:
                         api_key = get_zhipu_api_key()
-                        if not api_key:
-                            raise RuntimeError("Zhipu API key missing.")
                         client = ZhipuClient(api_key)
                         status_data = client.video_poll(zhipu_id)
                         if hasattr(status_data, 'status') and status_data.status == "succeeded":
@@ -516,46 +423,34 @@ else:
             return None
     _task_queue = _DummyQueue()
 
-# ----------------------------------------------------------------------
-# Public task functions
-# ----------------------------------------------------------------------
 def get_active_tasks() -> List[Tuple[str, str, str, int]]:
     return _task_queue.get_active_tasks()
 
 def get_task_status(task_id: str) -> Optional[Dict[str, Any]]:
     return _task_queue.get_task(task_id)
 
-# ----------------------------------------------------------------------
-# Build backward‑compatible MODELS dictionary for main.py
-# ----------------------------------------------------------------------
 MODELS = {}
 for service, models in SERVICES.items():
+    if not models:
+        continue
     first_model = models[0]
     desc = _MODEL_REGISTRY[first_model]["description"]
     MODELS[service] = {
         "description": desc,
-        "models": models   # optional, not used by main.py but could be useful
+        "models": models
     }
 
-# ----------------------------------------------------------------------
-# YuktiModel – now tied to a service, selects model per invoke
-# ----------------------------------------------------------------------
 class YuktiModel:
     def __init__(self, service: str):
         self.service = service
         if service not in SERVICES:
             raise ValueError(f"Unknown service: {service}")
-        # Determine provider for the service (all models in its list share same provider)
         first_model = SERVICES[service][0]
         self.provider = _MODEL_REGISTRY[first_model]["provider"]
         self.zhipu_api_key = get_zhipu_api_key()
         self.gemini_api_key = get_google_api_key()
 
     def invoke(self, prompt: str, **kwargs) -> Any:
-        """
-        Try each model in the service's priority list until one succeeds.
-        Respects concurrency limits and handles failures.
-        """
         last_error = None
         for model_key in SERVICES[self.service]:
             if not concurrency.can_use(model_key):
@@ -566,7 +461,7 @@ class YuktiModel:
                 if self.provider == "zhipu":
                     result = self._call_zhipu_model(model_key, prompt, **kwargs)
                 elif self.provider == "gemini":
-                    result = self._call_gemini_model(model_key, prompt, **kwargs)
+                    result = self._call_gemini_model(prompt, **kwargs)
                 else:
                     raise ValueError(f"Unknown provider: {self.provider}")
                 return result
@@ -580,13 +475,11 @@ class YuktiModel:
     def _call_zhipu_model(self, model_key: str, prompt: str, **kwargs) -> Any:
         client = ZhipuClient(self.zhipu_api_key)
         model_id = _MODEL_REGISTRY[model_key]["model_id"]
-        if model_id in ["glm-4-flash", "glm-5", "glm-4-plus", "glm-z1-airx", "search-pro",
-                        "glm-realtime-air", "autoglm-phone-multilingual", "glm-z1-air"]:
+        if model_id in ["glm-4-flash", "glm-4-plus", "glm-5"]:
             return client.text(model_id, prompt, temperature=kwargs.get("temperature", 0.1))
-        elif model_id.startswith("cogview"):
+        elif model_id in ["cogview-3-flash", "cogview-4"]:
             return client.image(model_id, prompt)
-        elif model_id.startswith("cogvideox"):
-            # Video is async; submit via queue
+        elif model_id in ["cogvideox-3", "cogvideox-flash"]:
             return _task_queue.submit_async(
                 variant=self.service,
                 model=model_id,
@@ -594,51 +487,36 @@ class YuktiModel:
                 **kwargs
             )
         elif model_id == "glm-4-voice":
-            # Audio generation via glm-4-voice
-            voice = kwargs.get("voice")  # glm-4-voice may not need voice param
-            return client.audio(model_id, prompt, voice=voice)
+            return client.audio(model_id, prompt, voice=kwargs.get("voice"))
         else:
             raise ValueError(f"Unsupported model: {model_id}")
 
-    def _call_gemini_model(self, model_key: str, prompt: str, **kwargs) -> str:
+    def _call_gemini_model(self, prompt: str, **kwargs) -> str:
         if not GEMINI_AVAILABLE:
             raise RuntimeError("Gemini not available")
         client = GeminiClient(self.gemini_api_key)
-        model_id = _MODEL_REGISTRY[model_key]["model_id"]
-        return client.text(model_id, prompt, temperature=kwargs.get("temperature", 0.1))
+        return client.text(prompt, temperature=kwargs.get("temperature", 0.1))
 
-# ----------------------------------------------------------------------
-# Public loader – now expects a service name
-# ----------------------------------------------------------------------
 def load_model(service: str) -> YuktiModel:
     return YuktiModel(service)
 
-# ----------------------------------------------------------------------
-# Public configuration functions
-# ----------------------------------------------------------------------
 def get_available_models() -> List[str]:
-    """Return list of service names that are usable (at least one model available)."""
     available = []
     for service in SERVICES:
         if service in ["Yukti‑Flash", "Yukti‑Quantum", "Yukti‑Image", "Yukti‑Video", "Yukti‑Audio"]:
             if ZHIPU_AVAILABLE:
                 available.append(service)
-        elif service == "Gemini 1.5 Flash":
+        elif service == "Gemini":
             if GEMINI_AVAILABLE:
                 available.append(service)
     return available
 
 def get_service_config(service: str) -> Optional[Dict[str, Any]]:
-    """Return the service's priority list (for UI display)."""
     if service in SERVICES:
         return {"models": SERVICES[service]}
     return None
 
 def get_model_config(service: str) -> Optional[Dict[str, Any]]:
-    """
-    Return the configuration of the first model in the service's priority list.
-    Used by think.py to determine model type (sync/async) and other metadata.
-    """
     if service not in SERVICES:
         return None
     first_model = SERVICES[service][0]
@@ -647,9 +525,6 @@ def get_model_config(service: str) -> Optional[Dict[str, Any]]:
     config['model_key'] = first_model
     return config
 
-# ----------------------------------------------------------------------
-# Export symbols
-# ----------------------------------------------------------------------
 __all__ = [
     "get_available_models",
     "get_service_config",

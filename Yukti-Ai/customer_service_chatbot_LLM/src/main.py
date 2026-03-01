@@ -1,6 +1,6 @@
 """
 Yukti AI – Main Application (Cyberpunk Ultimate Edition)
-Neon‑themed UI, 3D model selector, persistent media in chat, and lightning‑fast performance.
+Neon‑themed UI, 3D model selector with colored bar, persistent media, and lightning‑fast performance.
 """
 
 import os
@@ -34,20 +34,27 @@ from model_manager import (
 logging.basicConfig(level=logging.INFO, format='%(asctime)s - %(name)s - %(levelname)s - %(message)s')
 logger = logging.getLogger(__name__)
 
+# ----------------------------------------------------------------------
+# Page configuration – no sparkle, we'll use custom HTML for the neon "AI"
+# ----------------------------------------------------------------------
 st.set_page_config(
     page_title="Yukti AI",
-    page_icon="✨",
+    page_icon=" ",   # empty (we'll add custom neon AI in the title)
     layout="wide",
     initial_sidebar_state="expanded"
 )
 
-# Cyberpunk CSS
+# ----------------------------------------------------------------------
+# Cyberpunk CSS with 3D dropdown and colored bar
+# ----------------------------------------------------------------------
 st.markdown("""
 <style>
+    /* Global cyberpunk theme */
     .stApp {
         background: linear-gradient(135deg, #0d0b1a 0%, #1a1a2f 100%);
         color: #e0e0ff;
     }
+    /* Chat messages with neon glow */
     .stChatMessage {
         border-radius: 20px;
         padding: 1rem;
@@ -64,12 +71,14 @@ st.markdown("""
         background: rgba(0,255,255,0.05);
         border-left: 4px solid #00ffff;
     }
+    /* Sidebar */
     .css-1d391kg {
         background: rgba(10,10,20,0.9);
         backdrop-filter: blur(10px);
         border-right: 1px solid #ff00ff;
         box-shadow: -5px 0 20px rgba(255,0,255,0.3);
     }
+    /* 3D buttons */
     .stButton > button {
         background: linear-gradient(145deg, #1e1e3f, #2a2a5a);
         border: none;
@@ -95,6 +104,7 @@ st.markdown("""
         transform: translateY(4px);
         box-shadow: 0 2px 0 #0b0b1a, 0 8px 15px rgba(255,0,255,0.4);
     }
+    /* File uploader */
     .stFileUploader {
         background: rgba(30,30,60,0.5);
         border-radius: 15px;
@@ -102,6 +112,7 @@ st.markdown("""
         border: 1px dashed #ff00ff;
         box-shadow: 0 0 15px rgba(255,0,255,0.3);
     }
+    /* Compact images */
     .stImage {
         max-width: 300px;
         max-height: 300px;
@@ -110,9 +121,11 @@ st.markdown("""
         box-shadow: 0 0 15px #00ffff;
         margin: 0.5rem 0;
     }
+    /* Progress bar */
     .stProgress > div > div > div {
         background: linear-gradient(90deg, #ff00ff, #00ffff);
     }
+    /* Neon URL Sticker */
     .url-wrapper {
         display: flex;
         align-items: center;
@@ -153,6 +166,7 @@ st.markdown("""
         from { opacity: 1; }
         to { opacity: 0.8; box-shadow: 0 0 15px #ff00ff, inset 0 0 8px #ff00ff; }
     }
+    /* Model selector dropdown with 3D effect and colored bar */
     .stSelectbox > div > div {
         background: linear-gradient(145deg, #1e1e3f, #2a2a5a) !important;
         border: 1px solid #ff00ff !important;
@@ -160,6 +174,9 @@ st.markdown("""
         color: white !important;
         box-shadow: 0 5px 0 #0b0b1a, 0 10px 20px rgba(255,0,255,0.3) !important;
         transition: all 0.1s ease;
+        position: relative !important;
+        overflow: hidden !important;
+        padding-left: 12px !important;
     }
     .stSelectbox > div > div:hover {
         transform: translateY(-2px);
@@ -168,14 +185,55 @@ st.markdown("""
     .stSelectbox > div > div > div {
         color: white !important;
     }
+    /* Colored bar on the left */
+    .stSelectbox > div > div::before {
+        content: '';
+        position: absolute;
+        left: 0;
+        top: 0;
+        bottom: 0;
+        width: 6px;
+        background: linear-gradient(180deg, #ff00ff, #00ffff);
+        border-radius: 15px 0 0 15px;
+        box-shadow: 0 0 10px #ff00ff;
+    }
+    /* Style the dropdown arrow */
+    .stSelectbox > div > div svg {
+        fill: #ff00ff !important;
+    }
+    /* Hide Streamlit branding */
     #MainMenu {visibility: hidden;}
     footer {visibility: hidden;}
 </style>
 """, unsafe_allow_html=True)
 
-st.markdown("<h1 style='text-align: center; text-shadow: 0 0 10px #ff00ff, 0 0 20px #00ffff;'>Yukti AI</h1>", unsafe_allow_html=True)
-st.markdown("<p style='text-align: center; color: #aaa;'>Your Futuristic Cognitive Companion</p>", unsafe_allow_html=True)
+# ----------------------------------------------------------------------
+# Custom title with neon "AI" and the rest "Yukti AI"
+# ----------------------------------------------------------------------
+st.markdown("""
+<div style="display: flex; align-items: center; justify-content: center; gap: 10px;">
+    <span style="
+        font-size: 2.5rem;
+        font-weight: 900;
+        color: #fff;
+        background: #000;
+        padding: 5px 15px;
+        border-radius: 8px;
+        text-transform: uppercase;
+        letter-spacing: 2px;
+        border: 2px solid #ff00ff;
+        box-shadow: 0 0 15px #ff00ff, inset 0 0 10px #ff00ff;
+        text-shadow: 0 0 5px #fff, 0 0 15px #ff00ff;
+        animation: neon-pulse 1.5s infinite alternate;
+    ">AI</span>
+    <span style="font-size: 2.5rem; font-weight: 600; color: #e0e0ff; text-shadow: 0 0 10px #00ffff;">Yukti</span>
+</div>
+<p style='text-align: center; color: #aaa;'>Your Futuristic Cognitive Companion</p>
+""", unsafe_allow_html=True)
 
+# ----------------------------------------------------------------------
+# Session state initialization
+# ----------------------------------------------------------------------
 if "messages" not in st.session_state:
     st.session_state.messages = [
         {"role": "assistant", "content": "Hello! I'm Yukti AI. How can I help you today?"}
@@ -191,6 +249,9 @@ if "tasks" not in st.session_state:
 if "uploaded_files" not in st.session_state:
     st.session_state.uploaded_files = {}
 
+# ----------------------------------------------------------------------
+# Data sources configuration
+# ----------------------------------------------------------------------
 SOURCES = [{
     "type": "csv",
     "path": os.path.join(BASE_DIR, "dataset", "dataset.csv"),
@@ -199,6 +260,9 @@ SOURCES = [{
     "content_template": "Q: {prompt}\nA: {response}"
 }]
 
+# ----------------------------------------------------------------------
+# Helper functions (unchanged)
+# ----------------------------------------------------------------------
 def load_all_documents():
     docs = []
     for src in SOURCES:
@@ -327,6 +391,9 @@ def render_task(task_id):
                     st.download_button("📥 Download Image", data=requests.get(task_info['result_url']).content,
                                        file_name=f"yukti_image_{task_id[:8]}.png")
 
+# ----------------------------------------------------------------------
+# Sidebar (unchanged)
+# ----------------------------------------------------------------------
 with st.sidebar:
     st.markdown("""
     <div class="url-wrapper">
@@ -405,6 +472,9 @@ with st.sidebar:
         ]
         st.rerun()
 
+# ----------------------------------------------------------------------
+# Main chat interface (unchanged)
+# ----------------------------------------------------------------------
 for msg in st.session_state.messages:
     with st.chat_message(msg["role"]):
         st.markdown(msg["content"])

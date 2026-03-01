@@ -12,7 +12,7 @@ from typing import List, Dict, Any
 from langchain_core.documents import Document
 from langchain_helper import retrieve_documents
 from model_manager import load_model, get_model_config
-from language_detector import detect_language   # NEW
+from language_detector import detect_language
 
 logger = logging.getLogger(__name__)
 
@@ -47,7 +47,8 @@ def detect_emotion(text: str) -> str:
 def think(
     user_query: str,
     conversation_history: List[Dict[str, str]],
-    model_key: str
+    model_key: str,
+    language: str = None   # optional language override
 ) -> Dict[str, Any]:
     """
     Generate a response using a single LLM call.
@@ -60,10 +61,15 @@ def think(
     start_time = time.time()
     emotion = detect_emotion(user_query)
 
-    # NEW: Detect language once and store in kwargs for model invocation
-    lang_info = detect_language(user_query)
-    target_lang = lang_info['language']
-    logger.info(f"Detected language: {target_lang} (method: {lang_info['method']})")
+    # Determine target language
+    if language:
+        target_lang = language
+        method = 'provided'
+    else:
+        lang_info = detect_language(user_query)
+        target_lang = lang_info['language']
+        method = lang_info['method']
+    logger.info(f"Detected language: {target_lang} (method: {method})")
 
     try:
         docs = retrieve_cached(user_query, k=3)
@@ -93,11 +99,37 @@ def think(
         for t in conversation_history[-5:]
     )
 
-    # Build prompt with language awareness
+    # Map language code to readable name
+    lang_names = {
+        'hi': 'Hindi',
+        'en': 'English',
+        'ur': 'Urdu',
+        'bn': 'Bengali',
+        'te': 'Telugu',
+        'ta': 'Tamil',
+        'mr': 'Marathi',
+        'gu': 'Gujarati',
+        'kn': 'Kannada',
+        'ml': 'Malayalam',
+        'pa': 'Punjabi',
+        'or': 'Odia',
+        'as': 'Assamese',
+        'mai': 'Maithili',
+        'sat': 'Santali',
+        'ks': 'Kashmiri',
+        'sd': 'Sindhi',
+        'ne': 'Nepali',
+        'doi': 'Dogri',
+        'mni': 'Manipuri',
+        'bodo': 'Bodo',
+        'hinglish': 'Hinglish'
+    }
+    lang_name = lang_names.get(target_lang, target_lang)
+
+    # Build language instruction
     if target_lang == 'hinglish':
         lang_instruction = "Answer in Hinglish (mix of Hindi and English)."
     elif target_lang != 'en':
-        lang_name = get_language_name(target_lang)  # we need to import this or map
         lang_instruction = f"Answer in {lang_name}."
     else:
         lang_instruction = ""

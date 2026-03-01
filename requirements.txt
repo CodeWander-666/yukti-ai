@@ -1,11 +1,12 @@
-streamlit>=1.54.0
-langchain>=1.2.10
-langchain-community>=0.4.1
-langchain-core>=1.2.16
-langchain-openai>=0.3.0          # Required for OpenAI‑compatible endpoint
-faiss-cpu>=1.13.2
-sentence-transformers>=5.2.3
-python-dotenv>=1.2.1
-pandas>=2.3.3
-zai-sdk>=0.2.2                   # For async video generation
-ollama                             # Optional, for local fallback
+streamlit
+langchain
+langchain-community
+langchain-core
+faiss-cpu
+sentence-transformers
+pandas
+python-dotenv
+zai-sdk
+langchain-openai
+langchain-google-genai        # <-- added for Gemini fallback
+requests

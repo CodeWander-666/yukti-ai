@@ -1,10 +1,3 @@
-"""
-Yukti AI – Ultra‑High‑Accuracy Language Detector (10K+ Scenarios)
-Handles 100+ languages, script detection, Hinglish, code‑switching, explicit instructions.
-Uses FastText (176 languages) if available, with fallback to transformer and heuristic methods.
-Returns dictionary with keys: 'language', 'confidence', 'method', 'explicit_instruction'.
-"""
-
 import re
 import logging
 from typing import Dict, Any, Tuple, Optional

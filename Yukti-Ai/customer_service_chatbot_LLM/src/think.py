@@ -1,6 +1,7 @@
 """
-Yukti AI – Fast Thinking Engine
-Single LLM call, emotion detection, retrieval caching, and conversation history.
+Yukti AI – Fast Thinking Engine with Language Awareness
+Single LLM call, emotion detection, retrieval caching, conversation history,
+and automatic language detection for accurate multilingual responses.
 """
 
 import logging
@@ -11,6 +12,7 @@ from typing import List, Dict, Any
 from langchain_core.documents import Document
 from langchain_helper import retrieve_documents
 from model_manager import load_model, get_model_config
+from language_detector import detect_language   # NEW
 
 logger = logging.getLogger(__name__)
 
@@ -47,12 +49,21 @@ def think(
     conversation_history: List[Dict[str, str]],
     model_key: str
 ) -> Dict[str, Any]:
+    """
+    Generate a response using a single LLM call.
+    Detects language and passes it to the model for multilingual accuracy.
+    """
     config = get_model_config(model_key)
     if not config or config.get("type") != "sync":
         raise ValueError(f"think() requires a sync model, got {model_key}")
 
     start_time = time.time()
     emotion = detect_emotion(user_query)
+
+    # NEW: Detect language once and store in kwargs for model invocation
+    lang_info = detect_language(user_query)
+    target_lang = lang_info['language']
+    logger.info(f"Detected language: {target_lang} (method: {lang_info['method']})")
 
     try:
         docs = retrieve_cached(user_query, k=3)
@@ -82,15 +93,25 @@ def think(
         for t in conversation_history[-5:]
     )
 
+    # Build prompt with language awareness
+    if target_lang == 'hinglish':
+        lang_instruction = "Answer in Hinglish (mix of Hindi and English)."
+    elif target_lang != 'en':
+        lang_name = get_language_name(target_lang)  # we need to import this or map
+        lang_instruction = f"Answer in {lang_name}."
+    else:
+        lang_instruction = ""
+
     prompt = f"""You are Yukti AI, a helpful assistant.
-History:
+{lang_instruction}
+Conversation history:
 {history_str}
 
-Context:
+Relevant information:
 {context}
 
-Mood: {emotion}
-Query: {user_query}
+User mood: {emotion}
+User query: {user_query}
 
 Think step by step, then answer. Format:
 MONOLOGUE:
@@ -101,13 +122,14 @@ ANSWER:
     llm = load_model(model_key)
 
     try:
-        response = llm.invoke(prompt)
+        # Pass language info to model via kwargs
+        response = llm.invoke(prompt, language=target_lang)
         full_text = response.content if hasattr(response, 'content') else str(response)
     except Exception as e:
         logger.exception("LLM invocation failed, trying fallback prompt")
         fallback_prompt = f"Answer concisely: {user_query}"
         try:
-            response = llm.invoke(fallback_prompt)
+            response = llm.invoke(fallback_prompt, language=target_lang)
             full_text = response.content if hasattr(response, 'content') else str(response)
         except Exception as e2:
             logger.exception("Fallback also failed")

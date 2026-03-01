@@ -1,8 +1,3 @@
-"""
-Yukti AI – LangChain Helper (Ultimate Edition)
-Handles embeddings, FAISS vector store, and document retrieval with optional re‑ranking.
-"""
-
 import os
 import logging
 from functools import lru_cache

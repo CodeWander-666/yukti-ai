@@ -1,23 +1,28 @@
-# --- Frontend (Must use Pandas 2.x for Streamlit 1.54 compatibility) ---
 streamlit>=1.54.0
-pandas>=2.2.3,<3.0.0
+pandas>=2.2.3,<3.0.0                 # Streamlit requires pandas <3
 python-dotenv>=1.2.1
 pillow>=11.0.0
 
-# --- LangChain Ecosystem (2026 Stable) ---
+# LangChain ecosystem
 langchain>=1.2.10
 langchain-community>=0.4.1
 langchain-core>=1.2.16
-langchain-openai>=1.1.10
+langchain-openai>=1.1.8               # Supports openai 2.x
 
-# --- LLM SDKs (The 2026 Fix) ---
-openai>=2.24.0,<2.25.0
+# OpenAI SDK (for Zhipu GLM‑5)
+openai>=2.20.0,<3.0.0
+
+# Google Gemini (raw SDK – used directly)
 google-genai>=1.65.0
+
+# Zhipu async video
 zai-sdk>=0.2.2
 
-# --- Search & Networking (Corrected httpx) ---
+# Vector search & embeddings
 faiss-cpu>=1.13.2
 sentence-transformers>=5.2.3
-httpx>=0.28.1
+
+# HTTP & utilities
+httpx>=0.28.0                          # No upper cap – let resolver decide
 requests>=2.32.5
-rich>=14.3.3
+pydantic>=2.10.0,<3.0.0                # zai-sdk requires <3.0.0

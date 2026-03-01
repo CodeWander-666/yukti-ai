@@ -36,7 +36,7 @@ except ImportError:
     logging.warning("google-genai not installed; Gemini models disabled.")
 
 # NEW: Import language detector (optional – for auto-detection fallback)
-from language_detector import detect_language, get_language_name
+from language_detector import detect_language
 
 logger = logging.getLogger(__name__)
 

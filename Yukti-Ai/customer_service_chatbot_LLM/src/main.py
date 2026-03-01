@@ -1,6 +1,7 @@
 """
 Yukti AI – Main Application (Cyberpunk Ultimate Edition)
-Neon‑themed UI, 3D model selector with press effects, persistent media, and language detection.
+Neon‑themed UI, 3D model selector with press effects, persistent media,
+dynamic language adaptation (Hindi, English, Hinglish, explicit instructions, tone).
 """
 
 import os
@@ -244,6 +245,9 @@ if "tasks" not in st.session_state:
     st.session_state.tasks = {}
 if "uploaded_files" not in st.session_state:
     st.session_state.uploaded_files = {}
+# NEW: Track conversation language for consistency
+if "conversation_language" not in st.session_state:
+    st.session_state.conversation_language = None  # will be set after first message
 
 # ----------------------------------------------------------------------
 # Data sources configuration
@@ -484,11 +488,18 @@ for msg in st.session_state.messages:
                     st.video(media["url"])
 
 if prompt := st.chat_input("Ask me anything..."):
-    # NEW: Detect language and log it (optional)
+    # Detect language and tone
     lang_info = detect_language(prompt)
-    logger.info(f"Detected language: {lang_info['language']} (method: {lang_info['method']})")
-    # You could also store it in session state if needed
-    # st.session_state.last_language = lang_info
+    target_lang = lang_info['language']
+    explicit = lang_info['explicit_instruction']
+    logger.info(f"Detected language: {target_lang} (method: {lang_info['method']}, explicit: {explicit})")
+    
+    # Update conversation language if explicit instruction or first message
+    if explicit:
+        st.session_state.conversation_language = explicit
+    elif st.session_state.conversation_language is None:
+        st.session_state.conversation_language = target_lang
+    # else keep previous conversation language
 
     st.session_state.messages.append({"role": "user", "content": prompt})
     with st.chat_message("user"):
@@ -510,6 +521,7 @@ if prompt := st.chat_input("Ask me anything..."):
                     tmp.write(uploaded_file.getvalue())
                     extra_kwargs["image_url"] = tmp.name
 
+            # For text models, pass language as extra kwargs
             if model_key in ["Yukti‑Flash", "Yukti‑Quantum"]:
                 if not st.session_state.knowledge_base_ready:
                     full_response = "The knowledge base is not ready. Please click 'Update' in the sidebar first."
@@ -521,13 +533,17 @@ if prompt := st.chat_input("Ask me anything..."):
                         for msg in st.session_state.messages[-10:]
                     ]
                     with st.spinner("Thinking..."):
-                        result = think(prompt, history, model_key)
+                        # Pass the conversation language (or explicit if any) to think()
+                        # The language will be used by the model via kwargs
+                        result = think(prompt, history, model_key, language=st.session_state.conversation_language)
             else:
+                # Generation models – may or may not use language; pass it anyway
                 model = load_model(model_key)
                 with st.spinner("Generating..."):
                     if model_key == "Yukti‑Audio":
                         voice = "female"
-                        audio_path = model.invoke(prompt, voice=voice, **extra_kwargs)
+                        # Pass language hint (though GLM-4-Voice may not use it directly)
+                        audio_path = model.invoke(prompt, voice=voice, language=st.session_state.conversation_language, **extra_kwargs)
                         with open(audio_path, "rb") as f:
                             audio_bytes = f.read()
                         st.audio(audio_bytes, format="audio/wav")
@@ -560,7 +576,7 @@ if prompt := st.chat_input("Ask me anything..."):
                             for msg in st.session_state.messages[-10:]
                         ]
                         with st.spinner("Thinking..."):
-                            result = think(prompt, history, model_key)
+                            result = think(prompt, history, model_key, language=st.session_state.conversation_language)
 
             if result and result.get("type") == "async":
                 task_id = result.get("task_id")

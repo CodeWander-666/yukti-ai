@@ -1,23 +1,23 @@
-# --- Frontend & Core ---
+# --- Frontend (Must use Pandas 2.x for Streamlit 1.54 compatibility) ---
 streamlit>=1.54.0
-pandas>=3.0.1                  # Optimized for Python 3.13
+pandas>=2.2.3,<3.0.0
 python-dotenv>=1.2.1
-pillow>=11.0.0                 # Essential for Multimodal Gemini inputs
+pillow>=11.0.0
 
 # --- LangChain Ecosystem (2026 Stable) ---
 langchain>=1.2.10
 langchain-community>=0.4.1
 langchain-core>=1.2.16
-langchain-openai>=1.1.10       # Requires openai >=2.20.0, <3.0.0
+langchain-openai>=1.1.10
 
-# --- LLM SDKs (The Fix) ---
-# We cap at 2.25.0 to stay within the current March 2026 release cycle
-openai>=2.20.0,<2.25.0         
-google-genai>=1.65.0           # Latest 2026 SDK for Gemini 3
+# --- LLM SDKs (The 2026 Fix) ---
+openai>=2.24.0,<2.25.0
+google-genai>=1.65.0
 zai-sdk>=0.2.2
 
-# --- Search & Networking ---
-faiss-cpu>=1.13.2              # Standard for RAG in 2026
+# --- Search & Networking (Corrected httpx) ---
+faiss-cpu>=1.13.2
 sentence-transformers>=5.2.3
-httpx>=0.30.0
+httpx>=0.28.1
 requests>=2.32.5
+rich>=14.3.3

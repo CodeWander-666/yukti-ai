@@ -1,9 +1,3 @@
-"""
-Yukti AI – Model Manager (with Language Awareness)
-Handles all Yukti services with concurrency‑aware model selection,
-Gemini 3 dynamic selection, async video queue, and multilingual support.
-"""
-
 import logging
 import os
 import time

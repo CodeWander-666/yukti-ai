@@ -1,9 +1,3 @@
-"""
-Yukti AI – Fast Thinking Engine with Language Awareness
-Single LLM call, emotion detection, retrieval caching, conversation history,
-and automatic language detection for accurate multilingual responses.
-"""
-
 import logging
 import time
 import hashlib

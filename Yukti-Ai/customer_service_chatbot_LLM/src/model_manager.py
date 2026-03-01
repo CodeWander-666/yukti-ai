@@ -1,6 +1,6 @@
 """
-Yukti AI – Model Manager (Final Production Edition)
-Handles all Yukti services with concurrency‑aware model selection, Gemini as a separate service,
+Yukti AI – Model Manager (Stable Production Edition)
+Handles all Yukti services with concurrency‑aware model selection, proper audio via glm-4-voice,
 async video queue, and full compatibility with existing files.
 """
 
@@ -11,6 +11,7 @@ import threading
 import sqlite3
 import requests
 import tempfile
+import base64
 from datetime import datetime
 from pathlib import Path
 from typing import Dict, Any, Optional, List, Tuple
@@ -26,7 +27,7 @@ except ImportError:
     ZAI_AVAILABLE = False
     logging.warning("zai-sdk not installed; video generation disabled.")
 
-# Attempt to import Gemini SDK
+# Attempt to import Gemini SDK (optional – remove if not needed)
 try:
     from google import genai
     GEMINI_SDK_AVAILABLE = True
@@ -39,7 +40,7 @@ logger = logging.getLogger(__name__)
 # ----------------------------------------------------------------------
 # Constants
 # ----------------------------------------------------------------------
-ZHIPU_BASE_URL = "https://api.z.ai/api/paas/v4/"
+ZHIPU_BASE_URL = "https://open.bigmodel.cn/api/paas/v4"  # official endpoint
 
 # ----------------------------------------------------------------------
 # Individual Model Configurations (with concurrency limits)
@@ -146,27 +147,20 @@ _MODEL_REGISTRY = {
         "concurrency_limit": 3,
         "description": "CogVideoX Flash"
     },
-    # Audio models
-    "glm-tts": {
-        "model_id": "glm-tts",
+    # Audio model (updated to official glm-4-voice)
+    "glm-4-voice": {
+        "model_id": "glm-4-voice",
         "provider": "zhipu",
         "type": "sync",
-        "concurrency_limit": 5,
-        "description": "GLM-TTS"
+        "concurrency_limit": 5,   # based on V0 user rights
+        "description": "GLM-4 Voice (end‑to‑end speech)"
     },
-    "glm-tts-clone": {
-        "model_id": "glm-tts-clone",
-        "provider": "zhipu",
-        "type": "sync",
-        "concurrency_limit": 2,
-        "description": "GLM-TTS Clone"
-    },
-    # Gemini models (separate)
+    # Gemini (optional – remove if not used)
     "gemini-1.5-flash": {
-        "model_id": "gemini-1.5-flash",   # adjust to valid model name if needed
+        "model_id": "gemini-1.5-flash",  # replace with valid model name
         "provider": "gemini",
         "type": "sync",
-        "concurrency_limit": 60,           # not enforced, just placeholder
+        "concurrency_limit": 60,
         "description": "Google Gemini 1.5 Flash"
     }
 }
@@ -200,10 +194,9 @@ SERVICES = {
         "cogvideox-flash"
     ],
     "Yukti‑Audio": [
-        "glm-tts",
-        "glm-tts-clone"
+        "glm-4-voice"   # single model; if more are added, list them here
     ],
-    "Gemini 1.5 Flash": [   # direct Gemini service
+    "Gemini 1.5 Flash": [   # remove this service if not using Gemini
         "gemini-1.5-flash"
     ]
 }
@@ -266,8 +259,35 @@ def select_model_for_service(service: str) -> str:
 class ZhipuClient:
     def __init__(self, api_key: str):
         self.api_key = api_key
+        self.session = requests.Session()
+        self.session.headers.update({
+            "Authorization": f"Bearer {self.api_key}",
+            "Content-Type": "application/json"
+        })
+
+    def _request_with_retry(self, method: str, url: str, **kwargs) -> requests.Response:
+        """Make a request with exponential backoff retry (max 3 attempts)."""
+        max_retries = 3
+        for attempt in range(max_retries):
+            try:
+                resp = self.session.request(method, url, **kwargs)
+                if resp.status_code == 429:
+                    wait = (2 ** attempt) + (0.5 * attempt)  # exponential backoff
+                    logger.warning(f"Rate limit hit, retrying in {wait:.2f}s")
+                    time.sleep(wait)
+                    continue
+                resp.raise_for_status()
+                return resp
+            except requests.exceptions.RequestException as e:
+                if attempt == max_retries - 1:
+                    raise
+                logger.warning(f"Request failed (attempt {attempt+1}): {e}, retrying...")
+                time.sleep(2 ** attempt)
+        raise RuntimeError("Max retries exceeded")
 
     def text(self, model: str, prompt: str, temperature: float = 0.1) -> str:
+        """Invoke a Zhipu text model via ChatOpenAI (uses requests under the hood)."""
+        # We use ChatOpenAI as before, but we'll rely on its own retry.
         llm = ChatOpenAI(
             model=model,
             api_key=self.api_key,
@@ -278,36 +298,75 @@ class ZhipuClient:
         return llm.invoke(prompt).content
 
     def image(self, model: str, prompt: str) -> str:
+        """Generate an image and return its URL."""
+        url = f"{ZHIPU_BASE_URL}/images/generations"
         payload = {"model": model, "prompt": prompt}
-        data = self._direct_post("images/generations", payload)
-        return data["data"][0]["url"]
+        resp = self._request_with_retry("POST", url, json=payload)
+        return resp.json()["data"][0]["url"]
 
-    def audio(self, model: str, prompt: str, voice: str = "female") -> str:
+    def audio(self, model: str, prompt: str, voice: str = None) -> str:
+        """
+        Generate speech using glm-4-voice (chat‑based, returns base64 audio).
+        Saves audio to a temporary file and returns the path.
+        """
+        # For glm-4-voice, we use the chat completions endpoint with a special message.
+        url = f"{ZHIPU_BASE_URL}/chat/completions"
+        # Prepare messages: text instruction (optional) and prompt as text.
+        # The model can accept text and produce audio. We'll send the prompt as text.
+        messages = [
+            {
+                "role": "user",
+                "content": [
+                    {"type": "text", "text": prompt}
+                ]
+            }
+        ]
         payload = {
             "model": model,
-            "input": prompt,
-            "voice": voice,
-            "response_format": "wav"
+            "messages": messages,
+            "temperature": 0.1,
+            "stream": False
         }
-        audio_bytes = self._audio_post(payload)
+        resp = self._request_with_retry("POST", url, json=payload)
+        data = resp.json()
+        try:
+            # The response contains audio data in base64 under choices[0].message.audio.data
+            audio_b64 = data["choices"][0]["message"]["audio"]["data"]
+            audio_bytes = base64.b64decode(audio_b64)
+        except (KeyError, IndexError) as e:
+            logger.error(f"Unexpected response format: {data}")
+            raise RuntimeError("Audio generation failed: unexpected response format") from e
+
+        # Save to temporary file
         fd, path = tempfile.mkstemp(suffix=".wav", prefix="yukti_audio_")
         with os.fdopen(fd, "wb") as f:
             f.write(audio_bytes)
         return path
 
-    def _direct_post(self, endpoint: str, payload: dict) -> dict:
-        headers = {"Authorization": f"Bearer {self.api_key}", "Content-Type": "application/json"}
-        url = f"{ZHIPU_BASE_URL.rstrip('/')}/{endpoint.lstrip('/')}"
-        resp = requests.post(url, json=payload, headers=headers, timeout=60)
-        resp.raise_for_status()
-        return resp.json()
+    def video_submit(self, model: str, prompt: str, **kwargs) -> str:
+        """Submit an async video generation task using zai-sdk."""
+        if not ZAI_AVAILABLE:
+            raise RuntimeError("Video generation requires zai-sdk.")
+        from zai import ZhipuAiClient
+        client = ZhipuAiClient(api_key=self.api_key)
+        args = {
+            "model": model,
+            "prompt": prompt,
+            "quality": kwargs.get("quality", "quality"),
+            "with_audio": kwargs.get("with_audio", True),
+            "size": kwargs.get("size", "1920x1080"),
+            "fps": kwargs.get("fps", 30),
+        }
+        if "image_url" in kwargs and kwargs["image_url"]:
+            args["image_url"] = kwargs["image_url"]
+        response = client.videos.generations(**args)
+        return response.id
 
-    def _audio_post(self, payload: dict) -> bytes:
-        headers = {"Authorization": f"Bearer {self.api_key}", "Content-Type": "application/json"}
-        url = f"{ZHIPU_BASE_URL.rstrip('/')}/audio/speech"
-        resp = requests.post(url, json=payload, headers=headers, stream=True, timeout=60)
-        resp.raise_for_status()
-        return resp.content
+    def video_poll(self, task_id: str) -> dict:
+        """Poll video task status using zai-sdk."""
+        from zai import ZhipuAiClient
+        client = ZhipuAiClient(api_key=self.api_key)
+        return client.videos.retrieve_videos_result(task_id)
 
 class GeminiClient:
     def __init__(self, api_key: str):
@@ -401,19 +460,8 @@ if ZAI_AVAILABLE and ZHIPU_AVAILABLE:
                 api_key = get_zhipu_api_key()
                 if not api_key:
                     raise RuntimeError("Zhipu API key not configured.")
-                client = ZhipuAiClient(api_key=api_key)
-                args = {
-                    "model": model,
-                    "prompt": prompt,
-                    "quality": kwargs.get("quality", "quality"),
-                    "with_audio": kwargs.get("with_audio", True),
-                    "size": kwargs.get("size", "1920x1080"),
-                    "fps": kwargs.get("fps", 30),
-                }
-                if "image_url" in kwargs and kwargs["image_url"]:
-                    args["image_url"] = kwargs["image_url"]
-                response = client.videos.generations(**args)
-                zhipu_task_id = response.id
+                client = ZhipuClient(api_key)  # reuse our client
+                zhipu_task_id = client.video_submit(model, prompt, **kwargs)
                 with self.lock:
                     self.zhipu_map[local_id] = zhipu_task_id
                 self.update_task(local_id, status="pending")
@@ -433,8 +481,8 @@ if ZAI_AVAILABLE and ZHIPU_AVAILABLE:
                         api_key = get_zhipu_api_key()
                         if not api_key:
                             raise RuntimeError("Zhipu API key missing.")
-                        client = ZhipuAiClient(api_key=api_key)
-                        status_data = client.videos.retrieve_videos_result(zhipu_id)
+                        client = ZhipuClient(api_key)
+                        status_data = client.video_poll(zhipu_id)
                         if hasattr(status_data, 'status') and status_data.status == "succeeded":
                             result_url = status_data.video_url
                             self.update_task(local_id, status="completed", progress=100,
@@ -538,10 +586,16 @@ class YuktiModel:
         elif model_id.startswith("cogview"):
             return client.image(model_id, prompt)
         elif model_id.startswith("cogvideox"):
-            # Video is async; if we reach here, it's a sync call error
-            raise NotImplementedError("Video should be handled via async queue")
-        elif model_id in ["glm-tts", "glm-tts-clone"]:
-            voice = kwargs.get("voice", "female")
+            # Video is async; submit via queue
+            return _task_queue.submit_async(
+                variant=self.service,
+                model=model_id,
+                prompt=prompt,
+                **kwargs
+            )
+        elif model_id == "glm-4-voice":
+            # Audio generation via glm-4-voice
+            voice = kwargs.get("voice")  # glm-4-voice may not need voice param
             return client.audio(model_id, prompt, voice=voice)
         else:
             raise ValueError(f"Unsupported model: {model_id}")

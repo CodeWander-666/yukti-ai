@@ -21,27 +21,6 @@ def _cache_key(query: str) -> str:
     return hashlib.md5(query.encode()).hexdigest()
 
 # ----------------------------------------------------------------------
-# Conversation Memory (stores recent exchanges)
-# ----------------------------------------------------------------------
-class ConversationMemory:
-    def __init__(self, max_history: int = 10):
-        self.history = []
-        self.max_history = max_history
-
-    def add_exchange(self, user: str, assistant: str):
-        self.history.append({"user": user, "assistant": assistant})
-        if len(self.history) > self.max_history:
-            self.history.pop(0)
-
-    def get_recent(self, n: int = 5) -> str:
-        recent = self.history[-n:]
-        lines = []
-        for turn in recent:
-            lines.append(f"User: {turn['user']}")
-            lines.append(f"Yukti: {turn['assistant']}")
-        return "\n".join(lines)
-
-# ----------------------------------------------------------------------
 # Emotional tone detection (simple keyword‑based)
 # ----------------------------------------------------------------------
 def detect_emotion(text: str) -> str:
@@ -58,12 +37,13 @@ def detect_emotion(text: str) -> str:
     return "neutral"
 
 # ----------------------------------------------------------------------
-# Query expansion – generate multiple related questions
+# Query expansion – generate multiple related questions (cached)
 # ----------------------------------------------------------------------
 def expand_query(original_query: str, llm) -> List[str]:
-    """Generate 3 alternative phrasings of the query (cached)."""
+    """Generate 3 alternative phrasings of the query."""
     # Check cache
     if original_query in _query_expansion_cache:
+        logger.info("Query expansion cache hit")
         return _query_expansion_cache[original_query]
 
     prompt = f"""Given the user's question, generate 3 different ways to ask the same question.
@@ -164,7 +144,6 @@ Answer 2: ...
 """
     try:
         response = llm.invoke(prompt)
-        # Extract content from AIMessage
         return response.content if hasattr(response, 'content') else str(response)
     except Exception as e:
         logger.warning(f"Self‑questioning failed: {e}")
@@ -176,8 +155,7 @@ Answer 2: ...
 def think(
     user_query: str,
     conversation_history: List[Dict[str, str]],
-    model_key: str,
-    memory: Optional[ConversationMemory] = None
+    model_key: str
 ) -> Dict[str, Any]:
     """
     Generate a human‑like answer using:
@@ -187,23 +165,24 @@ def think(
     - Conversation memory
     - Emotional awareness
     - Internal monologue and final answer
+
+    Returns a dict with keys:
+        type: "sync"
+        answer: str
+        monologue: str
+        sources: List[Document]
+        thinking_time: float
+        emotion: str
     """
     config = get_model_config(model_key)
     if not config:
         raise ValueError(f"Unknown model: {model_key}")
 
-    # For async models (video), just submit task and return
-    if config["type"] == "async":
-        llm = load_model(model_key)
-        task_id = llm.invoke(user_query)
-        return {
-            "type": "async",
-            "task_id": task_id,
-            "variant": model_key,
-            "model": config["model"]
-        }
+    # This function should only be called for sync models (text).
+    # (Async models like video are handled directly in main.py)
+    if config["type"] != "sync":
+        raise ValueError(f"think() called with async model: {model_key}")
 
-    # --- Sync models: reasoning begins ---
     start_time = time.time()
     llm = load_model(model_key)
 
@@ -219,7 +198,8 @@ def think(
             "answer": "The knowledge base is not ready. Please update it first.",
             "monologue": "",
             "sources": [],
-            "thinking_time": 0.0
+            "thinking_time": 0.0,
+            "emotion": emotion
         }
     except Exception as e:
         logger.exception("Retrieval error")
@@ -228,7 +208,8 @@ def think(
             "answer": f"Sorry, I encountered an error accessing my memory: {e}",
             "monologue": "",
             "sources": [],
-            "thinking_time": 0.0
+            "thinking_time": time.time() - start_time,
+            "emotion": emotion
         }
 
     # Build context from retrieved docs
@@ -288,7 +269,8 @@ ANSWER:
             "answer": f"Sorry, I couldn't think through that: {e}",
             "monologue": "",
             "sources": docs,
-            "thinking_time": time.time() - start_time
+            "thinking_time": time.time() - start_time,
+            "emotion": emotion
         }
 
     # Extract monologue and answer
@@ -300,10 +282,6 @@ ANSWER:
             monologue, answer = parts.split("ANSWER:", 1)
             monologue = monologue.strip()
             answer = answer.strip()
-
-    # Optionally update memory (if memory object provided)
-    if memory:
-        memory.add_exchange(user_query, answer)
 
     return {
         "type": "sync",

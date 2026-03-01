@@ -1,6 +1,6 @@
 """
 Yukti AI – Main Application (Cyberpunk Ultimate Edition)
-Neon‑themed UI, 3D model selector with press effects, persistent media, and lightning‑fast performance.
+Neon‑themed UI, 3D model selector with press effects, persistent media, and language detection.
 """
 
 import os
@@ -30,6 +30,8 @@ from model_manager import (
     ZHIPU_AVAILABLE,
     load_model,
 )
+# NEW: Import language detector
+from language_detector import detect_language
 
 logging.basicConfig(level=logging.INFO, format='%(asctime)s - %(name)s - %(levelname)s - %(message)s')
 logger = logging.getLogger(__name__)
@@ -467,7 +469,7 @@ with st.sidebar:
         st.rerun()
 
 # ----------------------------------------------------------------------
-# Main chat interface (unchanged)
+# Main chat interface
 # ----------------------------------------------------------------------
 for msg in st.session_state.messages:
     with st.chat_message(msg["role"]):
@@ -482,6 +484,12 @@ for msg in st.session_state.messages:
                     st.video(media["url"])
 
 if prompt := st.chat_input("Ask me anything..."):
+    # NEW: Detect language and log it (optional)
+    lang_info = detect_language(prompt)
+    logger.info(f"Detected language: {lang_info['language']} (method: {lang_info['method']})")
+    # You could also store it in session state if needed
+    # st.session_state.last_language = lang_info
+
     st.session_state.messages.append({"role": "user", "content": prompt})
     with st.chat_message("user"):
         st.markdown(prompt)

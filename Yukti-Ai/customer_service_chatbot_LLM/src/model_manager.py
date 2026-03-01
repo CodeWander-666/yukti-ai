@@ -1,7 +1,7 @@
 """
-Yukti AI – Model Manager (Gemini Quota‑Aware Edition)
-Gemini now handles 429 errors by retrying after the required delay and includes more fallback models.
-All other logic (Zhipu, concurrency, queue) unchanged.
+Yukti AI – Model Manager (with Language Awareness)
+Handles all Yukti services with concurrency‑aware model selection,
+Gemini 3 dynamic selection, async video queue, and multilingual support.
 """
 
 import logging
@@ -34,6 +34,9 @@ try:
 except ImportError:
     GEMINI_SDK_AVAILABLE = False
     logging.warning("google-genai not installed; Gemini models disabled.")
+
+# NEW: Import language detector (optional – for auto-detection fallback)
+from language_detector import detect_language, get_language_name
 
 logger = logging.getLogger(__name__)
 
@@ -176,7 +179,27 @@ class ZhipuClient:
                 time.sleep(2 ** attempt)
         raise RuntimeError("Max retries exceeded")
 
-    def text(self, model: str, prompt: str, temperature: float = 0.1) -> str:
+    def text(self, model: str, prompt: str, temperature: float = 0.1, language: str = None) -> str:
+        """
+        Generate text with optional language hint.
+        If language is not provided, auto‑detect from prompt.
+        """
+        # Determine target language
+        if language is None:
+            lang_info = detect_language(prompt)
+            target_lang = lang_info['language']
+        else:
+            target_lang = language
+
+        # Prepare language‑specific prompt
+        if target_lang == 'hinglish':
+            enhanced_prompt = f"हिंग्लिश में जवाब दें। सवाल: {prompt}"
+        elif target_lang != 'en':
+            lang_name = get_language_name(target_lang)  # we'll define a simple map
+            enhanced_prompt = f"Respond in {lang_name}. Question: {prompt}"
+        else:
+            enhanced_prompt = prompt
+
         llm = ChatOpenAI(
             model=model,
             api_key=self.api_key,
@@ -184,12 +207,12 @@ class ZhipuClient:
             temperature=temperature,
             max_retries=2,
         )
-        response = llm.invoke(prompt)
+        response = llm.invoke(enhanced_prompt)
         content = response.content if hasattr(response, 'content') else str(response)
         if not content:
             logger.warning("Empty response, retrying with higher temperature")
             llm.temperature = 0.7
-            response2 = llm.invoke(prompt)
+            response2 = llm.invoke(enhanced_prompt)
             content2 = response2.content if hasattr(response2, 'content') else str(response2)
             if content2:
                 return content2
@@ -242,9 +265,6 @@ class ZhipuClient:
         client = ZhipuAiClient(api_key=self.api_key)
         return client.videos.retrieve_videos_result(task_id)
 
-# ----------------------------------------------------------------------
-# GEMINI CLIENT – QUOTA‑AWARE WITH FALLBACKS
-# ----------------------------------------------------------------------
 class GeminiClient:
     def __init__(self, api_key: str):
         self.client = genai.Client(api_key=api_key)
@@ -285,15 +305,40 @@ class GeminiClient:
         logger.warning(f"None of {preferred} found, using first available: {available[0]}")
         return available[0]
 
-    def text(self, prompt: str, temperature: float = 0.1) -> str:
+    def text(self, prompt: str, temperature: float = 0.1, language: str = None) -> str:
+        """
+        Generate text with optional language hint.
+        Gemini natively supports many languages; we add a system instruction if needed.
+        """
         if self._selected_model is None:
             self._selected_model = self._select_model()
+
+        # Determine target language (if not provided, auto‑detect)
+        if language is None:
+            lang_info = detect_language(prompt)
+            target_lang = lang_info['language']
+        else:
+            target_lang = language
+
+        # Add language instruction for non‑English (Gemini is good, but explicit helps)
+        if target_lang == 'hinglish':
+            system_msg = "Respond in Hinglish (mix of Hindi and English)."
+        elif target_lang != 'en':
+            lang_name = get_language_name(target_lang)
+            system_msg = f"Respond in {lang_name}."
+        else:
+            system_msg = None
+
+        if system_msg:
+            full_prompt = f"{system_msg}\n\nUser: {prompt}"
+        else:
+            full_prompt = prompt
 
         for attempt in range(2):
             try:
                 response = self.client.models.generate_content(
                     model=self._selected_model,
-                    contents=prompt,
+                    contents=full_prompt,
                     config=types.GenerateContentConfig(
                         temperature=temperature,
                         max_output_tokens=2048
@@ -312,14 +357,14 @@ class GeminiClient:
                         self._selected_model = None
                         self._selected_model = self._select_model()
                         logger.info(f"Switching to fallback model: {self._selected_model}")
-                        return self.text(prompt, temperature)
+                        return self.text(prompt, temperature, language)
                 logger.exception("Gemini invocation failed")
                 raise RuntimeError(f"Gemini error: {e}")
 
         raise RuntimeError("Gemini service unavailable after retries")
 
 # ----------------------------------------------------------------------
-# Async Task Queue for Video
+# Async Task Queue (unchanged)
 # ----------------------------------------------------------------------
 if ZAI_AVAILABLE and ZHIPU_AVAILABLE:
     class ZhipuTaskQueue:
@@ -473,6 +518,9 @@ class YuktiModel:
         self.gemini_api_key = get_google_api_key()
 
     def invoke(self, prompt: str, **kwargs) -> Any:
+        """
+        Passes any extra kwargs (e.g., language) to the underlying model.
+        """
         last_error = None
         for model_key in SERVICES[self.service]:
             if not concurrency.can_use(model_key):
@@ -498,7 +546,9 @@ class YuktiModel:
         client = ZhipuClient(self.zhipu_api_key)
         model_id = _MODEL_REGISTRY[model_key]["model_id"]
         if model_id in ["glm-4-flash", "glm-4-plus", "glm-5"]:
-            return client.text(model_id, prompt, temperature=kwargs.get("temperature", 0.1))
+            # Pass language from kwargs if present
+            return client.text(model_id, prompt, temperature=kwargs.get("temperature", 0.1),
+                               language=kwargs.get("language"))
         elif model_id in ["cogview-3-flash", "cogview-4"]:
             return client.image(model_id, prompt)
         elif model_id in ["cogvideox-3", "cogvideox-flash"]:
@@ -517,7 +567,8 @@ class YuktiModel:
         if not GEMINI_AVAILABLE:
             raise RuntimeError("Gemini not available")
         client = GeminiClient(self.gemini_api_key)
-        return client.text(prompt, temperature=kwargs.get("temperature", 0.1))
+        return client.text(prompt, temperature=kwargs.get("temperature", 0.1),
+                           language=kwargs.get("language"))
 
 def load_model(service: str) -> YuktiModel:
     return YuktiModel(service)
@@ -546,6 +597,33 @@ def get_model_config(service: str) -> Optional[Dict[str, Any]]:
     config['service'] = service
     config['model_key'] = first_model
     return config
+
+# Simple helper to map language codes to names
+def get_language_name(code: str) -> str:
+    names = {
+        'hi': 'Hindi',
+        'en': 'English',
+        'ur': 'Urdu',
+        'bn': 'Bengali',
+        'te': 'Telugu',
+        'ta': 'Tamil',
+        'mr': 'Marathi',
+        'gu': 'Gujarati',
+        'kn': 'Kannada',
+        'ml': 'Malayalam',
+        'pa': 'Punjabi',
+        'or': 'Odia',
+        'as': 'Assamese',
+        'mai': 'Maithili',
+        'sat': 'Santali',
+        'ks': 'Kashmiri',
+        'sd': 'Sindhi',
+        'ne': 'Nepali',
+        'doi': 'Dogri',
+        'mni': 'Manipuri',
+        'bodo': 'Bodo',
+    }
+    return names.get(code, code)
 
 __all__ = [
     "get_available_models",

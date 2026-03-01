@@ -1,3 +1,8 @@
+"""
+Yukti AI – Fast Thinking Engine
+Single LLM call, emotion detection, retrieval caching, and conversation history.
+"""
+
 import logging
 import time
 import hashlib

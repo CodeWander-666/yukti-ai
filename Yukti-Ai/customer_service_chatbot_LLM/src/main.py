@@ -1,6 +1,6 @@
 """
 Yukti AI – Main Application (Cyberpunk Ultimate Edition)
-Neon‑themed UI, 3D model selector with colored bar, persistent media, and lightning‑fast performance.
+Neon‑themed UI, 3D model selector with press effects, persistent media, and lightning‑fast performance.
 """
 
 import os
@@ -35,17 +35,17 @@ logging.basicConfig(level=logging.INFO, format='%(asctime)s - %(name)s - %(level
 logger = logging.getLogger(__name__)
 
 # ----------------------------------------------------------------------
-# Page configuration – no sparkle, we'll use custom HTML for the neon "AI"
+# Page configuration – no sparkle, we'll use custom HTML for the title
 # ----------------------------------------------------------------------
 st.set_page_config(
     page_title="Yukti AI",
-    page_icon=" ",   # empty (we'll add custom neon AI in the title)
+    page_icon=" ",   # empty (we'll add custom neon in the title)
     layout="wide",
     initial_sidebar_state="expanded"
 )
 
 # ----------------------------------------------------------------------
-# Cyberpunk CSS with 3D dropdown and colored bar
+# Cyberpunk CSS with 3D selectbox press effects
 # ----------------------------------------------------------------------
 st.markdown("""
 <style>
@@ -166,7 +166,7 @@ st.markdown("""
         from { opacity: 1; }
         to { opacity: 0.8; box-shadow: 0 0 15px #ff00ff, inset 0 0 8px #ff00ff; }
     }
-    /* Model selector dropdown with 3D effect and colored bar */
+    /* Model selector – styled as a 3D button with press effect */
     .stSelectbox > div > div {
         background: linear-gradient(145deg, #1e1e3f, #2a2a5a) !important;
         border: 1px solid #ff00ff !important;
@@ -175,31 +175,25 @@ st.markdown("""
         box-shadow: 0 5px 0 #0b0b1a, 0 10px 20px rgba(255,0,255,0.3) !important;
         transition: all 0.1s ease;
         position: relative !important;
-        overflow: hidden !important;
-        padding-left: 12px !important;
+        padding: 0.6rem 1rem !important;
+        margin: 0.5rem 0 !important;
+        cursor: pointer;
+        font-weight: 600;
+        text-align: center;
+        border-bottom: 2px solid #ff00ff !important;
+        transform: translateY(0);
     }
     .stSelectbox > div > div:hover {
         transform: translateY(-2px);
         box-shadow: 0 7px 0 #0b0b1a, 0 15px 25px rgba(0,255,255,0.4) !important;
+        background: linear-gradient(145deg, #2a2a5a, #3a3a7a) !important;
+    }
+    .stSelectbox > div > div:active {
+        transform: translateY(4px);
+        box-shadow: 0 2px 0 #0b0b1a, 0 8px 15px rgba(255,0,255,0.4) !important;
     }
     .stSelectbox > div > div > div {
         color: white !important;
-    }
-    /* Colored bar on the left */
-    .stSelectbox > div > div::before {
-        content: '';
-        position: absolute;
-        left: 0;
-        top: 0;
-        bottom: 0;
-        width: 6px;
-        background: linear-gradient(180deg, #ff00ff, #00ffff);
-        border-radius: 15px 0 0 15px;
-        box-shadow: 0 0 10px #ff00ff;
-    }
-    /* Style the dropdown arrow */
-    .stSelectbox > div > div svg {
-        fill: #ff00ff !important;
     }
     /* Hide Streamlit branding */
     #MainMenu {visibility: hidden;}
@@ -208,10 +202,11 @@ st.markdown("""
 """, unsafe_allow_html=True)
 
 # ----------------------------------------------------------------------
-# Custom title with neon "AI" and the rest "Yukti AI"
+# Custom title: "Yukti" followed by neon "AI"
 # ----------------------------------------------------------------------
 st.markdown("""
 <div style="display: flex; align-items: center; justify-content: center; gap: 10px;">
+    <span style="font-size: 2.5rem; font-weight: 600; color: #e0e0ff; text-shadow: 0 0 10px #00ffff;">Yukti</span>
     <span style="
         font-size: 2.5rem;
         font-weight: 900;
@@ -226,7 +221,6 @@ st.markdown("""
         text-shadow: 0 0 5px #fff, 0 0 15px #ff00ff;
         animation: neon-pulse 1.5s infinite alternate;
     ">AI</span>
-    <span style="font-size: 2.5rem; font-weight: 600; color: #e0e0ff; text-shadow: 0 0 10px #00ffff;">Yukti</span>
 </div>
 <p style='text-align: center; color: #aaa;'>Your Futuristic Cognitive Companion</p>
 """, unsafe_allow_html=True)

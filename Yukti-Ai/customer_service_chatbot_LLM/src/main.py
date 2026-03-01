@@ -4,7 +4,7 @@ import time
 import logging
 from pathlib import Path
 
-# Force project root into path (ensures imports work on Streamlit Cloud)
+# Add project root to path (ensures imports work on Streamlit Cloud)
 PROJECT_ROOT = Path(__file__).parent.parent.parent.parent
 if str(PROJECT_ROOT) not in sys.path:
     sys.path.insert(0, str(PROJECT_ROOT))
@@ -172,7 +172,7 @@ st.markdown("""
 # Title and subtitle
 # ----------------------------------------------------------------------
 st.title("Yukti AI")
-st.caption("Future of Indian Chatbot ")
+st.caption("Your Futuristic Cognitive Companion")
 
 # ----------------------------------------------------------------------
 # Session state initialization
@@ -189,8 +189,6 @@ if "knowledge_base_ready" not in st.session_state:
         st.session_state.knowledge_base_ready = False
 if "tasks" not in st.session_state:
     st.session_state.tasks = {}  # task_id -> {variant, status, progress, result_url, error}
-if "task_refresh_counter" not in st.session_state:
-    st.session_state.task_refresh_counter = 0
 if "uploaded_files" not in st.session_state:
     st.session_state.uploaded_files = {}  # model -> list of file paths (for persistence)
 
@@ -332,7 +330,6 @@ def render_task(task_id):
                         st.session_state.tasks[task_id].update(updated)
                     st.rerun()
             elif task_info['status'] == 'completed' and task_info.get('result_url'):
-                # Download button (will not remove media)
                 if task_info['variant'] == 'Yukti‑Video':
                     st.markdown(f"[🎬 Watch Video]({task_info['result_url']})")
                     st.download_button("📥 Download", data=requests.get(task_info['result_url']).content,
@@ -343,25 +340,25 @@ def render_task(task_id):
                                        file_name=f"yukti_image_{task_id[:8]}.png")
 
 # ----------------------------------------------------------------------
-# Sidebar – cleaned up and professional
+# Sidebar
 # ----------------------------------------------------------------------
 with st.sidebar:
     # Neon URL Sticker
     st.markdown("""
     <div class="url-wrapper">
       <span class="neon-sticker">YuktiAI</span>
-      <a href="" target="_blank" class="url-text"</a>
+      <a href="" target="_blank" class="url-text"></a>
     </div>
     """, unsafe_allow_html=True)
     st.divider()
 
-    st.markdown("##  Brain")
+    st.markdown("## Brain")
 
     # Model selector – with non‑empty label hidden
     model_options = get_available_models()
     display_names = [f"{m} – {MODELS[m]['description']}" for m in model_options]
     selected_display = st.selectbox(
-        label="Select model",  # non‑empty label, but hidden visually
+        label="Select model",
         options=display_names,
         index=0,
         key="model_display",
@@ -373,7 +370,7 @@ with st.sidebar:
     # File upload area (visible only when relevant)
     uploaded_file = None
     if selected_model in ["Yukti‑Video", "Yukti‑Image", "Yukti‑Audio"]:
-        st.markdown("### 📎 Attach File")
+        st.markdown("### Attach File")
         if selected_model == "Yukti‑Video":
             uploaded_file = st.file_uploader("Upload image (optional)", type=["png", "jpg", "jpeg"])
         elif selected_model == "Yukti‑Image":
@@ -383,21 +380,21 @@ with st.sidebar:
 
     st.divider()
 
-    # Knowledge Base (simplified)
-    st.markdown("###  Knowledge Base")
-    if st.button(" Update", use_container_width=True):
+    # Knowledge Base
+    st.markdown("### Knowledge Base")
+    if st.button("Update", use_container_width=True):
         rebuild_knowledge_base()
     if st.session_state.knowledge_base_ready:
-        st.markdown(" **Active**")
+        st.markdown("**Active**")
     else:
-        st.markdown(" **Not built**")
+        st.markdown("**Not built**")
 
     st.divider()
 
     # Active tasks (only if Zhipu async available)
     if ZHIPU_AVAILABLE:
-        st.markdown("###  Tasks")
-        if st.button("⟳ Refresh Tasks", use_container_width=True):
+        st.markdown("### Tasks")
+        if st.button("Refresh Tasks", use_container_width=True):
             st.rerun()
         try:
             active_tasks = get_active_tasks()
@@ -423,7 +420,7 @@ with st.sidebar:
         st.divider()
 
     # Clear Conversation
-    if st.button("🗑️ Clear Chat", use_container_width=True):
+    if st.button("Clear Chat", use_container_width=True):
         st.session_state.messages = [
             {"role": "assistant", "content": "Hello! I'm Yukti AI. How can I help you today?"}
         ]
@@ -467,7 +464,6 @@ if prompt := st.chat_input("Ask me anything..."):
             # For generation models that may need uploaded file
             extra_kwargs = {}
             if uploaded_file is not None:
-                # Save uploaded file temporarily
                 import tempfile
                 with tempfile.NamedTemporaryFile(delete=False, suffix=Path(uploaded_file.name).suffix) as tmp:
                     tmp.write(uploaded_file.getvalue())
@@ -491,27 +487,24 @@ if prompt := st.chat_input("Ask me anything..."):
                 model = load_model(model_key)
                 with st.spinner("Generating..."):
                     if model_key == "Yukti‑Audio":
-                        voice = "female"  # could add a selector if desired
+                        voice = "female"
                         audio_path = model.invoke(prompt, voice=voice, **extra_kwargs)
                         with open(audio_path, "rb") as f:
                             audio_bytes = f.read()
                         st.audio(audio_bytes, format="audio/wav")
-                        st.download_button("📥 Download Audio", data=audio_bytes, file_name="yukti_audio.wav")
+                        st.download_button("Download Audio", data=audio_bytes, file_name="yukti_audio.wav")
                         full_response = "Audio generated."
                         result = {"type": "sync", "format": "audio"}
                         media.append({"type": "audio", "url": audio_path})
                     elif model_key == "Yukti‑Image":
                         image_url = model.invoke(prompt, **extra_kwargs)
-                        # Display compactly
                         st.image(image_url, use_container_width=False, width=300)
-                        # Download button
                         img_data = requests.get(image_url).content
-                        st.download_button("📥 Download Image", data=img_data, file_name="yukti_image.png")
+                        st.download_button("Download Image", data=img_data, file_name="yukti_image.png")
                         full_response = "Image generated."
                         result = {"type": "sync", "format": "image"}
                         media.append({"type": "image", "url": image_url})
                     elif model_key == "Yukti‑Video":
-                        params = {}  # could add advanced params later
                         task_id = model.invoke(prompt, **extra_kwargs)
                         st.session_state.tasks[task_id] = {
                             "variant": "Yukti‑Video",
@@ -537,7 +530,6 @@ if prompt := st.chat_input("Ask me anything..."):
                 st.info(f"Task {task_id} submitted. Check sidebar for progress.")
             elif result and result.get("type") == "sync" and result.get("answer"):
                 answer = result.get("answer", "")
-                # Always show thinking process (no toggle)
                 if result.get("monologue"):
                     with st.expander("Show thinking process"):
                         st.markdown(result["monologue"])

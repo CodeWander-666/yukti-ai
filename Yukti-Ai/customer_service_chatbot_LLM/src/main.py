@@ -1,3 +1,8 @@
+"""
+Yukti AI – Main Application (Production Ready)
+Integrates all models with real‑time progress, cyberpunk UI, and bulletproof error handling.
+"""
+
 import os
 import sys
 import time
@@ -37,7 +42,7 @@ logger = logging.getLogger(__name__)
 # ----------------------------------------------------------------------
 st.set_page_config(
     page_title="Yukti AI",
-    page_icon="✨",  # could be changed but we keep it simple
+    page_icon="✨",
     layout="wide",
     initial_sidebar_state="expanded"
 )
@@ -370,8 +375,11 @@ with st.sidebar:
 
     # Model selector – 3D dropdown with Yukti names only (no GLM exposed)
     model_options = get_available_models()
-    # Create display names with description
-    display_names = [f"{m} – {MODELS.get(m, {}).get('description', '')}" for m in model_options]
+    # Build display names with safe access to description
+    display_names = [
+        f"{m} – {MODELS.get(m, {}).get('description', 'No description')}"
+        for m in model_options
+    ]
     selected_display = st.selectbox(
         label="Select model",
         options=display_names,
@@ -484,7 +492,7 @@ if prompt := st.chat_input("Ask me anything..."):
                     extra_kwargs["image_url"] = tmp.name
 
             # For text models that need knowledge base
-            if config.get("type") == "sync" and model_key in ["Yukti‑Flash", "Yukti‑Quantum"]:
+            if model_key in ["Yukti‑Flash", "Yukti‑Quantum"]:
                 if not st.session_state.knowledge_base_ready:
                     full_response = "The knowledge base is not ready. Please click 'Update' in the sidebar first."
                     response_placeholder.markdown(full_response)
@@ -542,12 +550,15 @@ if prompt := st.chat_input("Ask me anything..."):
             if result and result.get("type") == "async":
                 task_id = result.get("task_id")
                 st.info(f"Task {task_id} submitted. Check sidebar for progress.")
-            elif result and result.get("type") == "sync" and result.get("answer"):
+            elif result and result.get("type") == "sync":
                 answer = result.get("answer", "")
+                if not answer:
+                    answer = "(No response generated)"
+                    st.warning("The model returned an empty response. Please try again.")
                 if result.get("monologue"):
                     with st.expander("Show thinking process"):
                         st.markdown(result["monologue"])
-                # Stream the answer and then save the final text
+                # Stream the answer
                 stream_response(response_placeholder, answer, delay=0.03)
                 if result.get("sources"):
                     with st.expander("View source documents"):

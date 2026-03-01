@@ -1,9 +1,3 @@
-"""
-Yukti AI – Main Application (Cyberpunk Ultimate Edition)
-Neon‑themed UI, 3D model selector with press effects, persistent media,
-dynamic language adaptation (Hindi, English, Hinglish, explicit instructions, tone).
-"""
-
 import os
 import sys
 import time

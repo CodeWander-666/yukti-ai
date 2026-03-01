@@ -1,6 +1,7 @@
 """
-Yukti AI – Model Manager (Intelligent Concurrency-Aware Edition)
-Automatically selects the best available model for each service based on concurrency limits and priority.
+Yukti AI – Model Manager (Ultimate Production Edition)
+Handles all Yukti models with concurrency‑aware selection, service‑based priority,
+Gemini integration, and async video queue.
 """
 
 import logging
@@ -44,7 +45,7 @@ ZHIPU_BASE_URL = "https://api.z.ai/api/paas/v4/"
 # Individual Model Configurations (with concurrency limits)
 # ----------------------------------------------------------------------
 MODELS = {
-    # Text models
+    # Text models (Zhipu)
     "search-pro": {
         "model_id": "search-pro",
         "provider": "zhipu",
@@ -56,7 +57,7 @@ MODELS = {
         "model_id": "glm-realtime-air",
         "provider": "zhipu",
         "type": "sync",
-        "concurrency_limit": 5,  # estimate
+        "concurrency_limit": 30,   # estimate based on similar models
         "description": "Realtime air model"
     },
     "autoglm-phone-multilingual": {
@@ -325,35 +326,156 @@ class GeminiClient:
             raise RuntimeError(f"Gemini error: {e}")
 
 # ----------------------------------------------------------------------
-# Async Task Queue (unchanged, but uses model keys)
+# Async Task Queue for Video (unchanged from earlier)
 # ----------------------------------------------------------------------
-# (keep existing AsyncTaskQueue implementation – omitted for brevity)
-# In submit_async, pass model_key to identify the specific model.
+if ZAI_AVAILABLE and ZHIPU_AVAILABLE:
+    class ZhipuTaskQueue:
+        def __init__(self, db_path: str = "yukti_tasks.db"):
+            self.db_path = db_path
+            self.conn = sqlite3.connect(db_path, check_same_thread=False)
+            self._init_db()
+            self.lock = threading.Lock()
+            self.zhipu_map: Dict[str, str] = {}  # local_task_id -> zhipu_task_id
+            self._start_poller()
+
+        def _init_db(self):
+            self.conn.execute("""
+                CREATE TABLE IF NOT EXISTS tasks (
+                    task_id TEXT PRIMARY KEY,
+                    variant TEXT,
+                    model TEXT,
+                    status TEXT,
+                    progress INTEGER,
+                    result_url TEXT,
+                    error TEXT,
+                    created_at TIMESTAMP,
+                    completed_at TIMESTAMP
+                )
+            """)
+            self.conn.commit()
+
+        def add_task(self, task_id: str, variant: str, model: str):
+            with self.lock:
+                self.conn.execute(
+                    "INSERT INTO tasks VALUES (?,?,?,?,?,?,?,?,?)",
+                    (task_id, variant, model, "submitted", 0, "", "", datetime.now(), None)
+                )
+                self.conn.commit()
+
+        def update_task(self, task_id: str, **kwargs):
+            with self.lock:
+                fields = ", ".join([f"{k}=?" for k in kwargs])
+                values = list(kwargs.values()) + [task_id]
+                self.conn.execute(f"UPDATE tasks SET {fields} WHERE task_id=?", values)
+                self.conn.commit()
+
+        def get_task(self, task_id: str) -> Optional[Dict[str, Any]]:
+            cursor = self.conn.execute("SELECT * FROM tasks WHERE task_id=?", (task_id,))
+            row = cursor.fetchone()
+            if not row:
+                return None
+            return {
+                "task_id": row[0],
+                "variant": row[1],
+                "model": row[2],
+                "status": row[3],
+                "progress": row[4],
+                "result_url": row[5],
+                "error": row[6],
+                "created_at": row[7],
+                "completed_at": row[8],
+            }
+
+        def get_active_tasks(self) -> List[Tuple[str, str, str, int]]:
+            cursor = self.conn.execute(
+                "SELECT task_id, variant, status, progress FROM tasks WHERE status IN ('submitted','pending','processing') ORDER BY created_at"
+            )
+            return cursor.fetchall()
+
+        def submit_async(self, variant: str, model: str, prompt: str, **kwargs) -> str:
+            """Submit an async video generation task using zai-sdk."""
+            local_id = f"{variant}_{int(time.time())}_{abs(hash(prompt)) % 10000}"
+            self.add_task(local_id, variant, model)
+
+            try:
+                api_key = get_zhipu_api_key()
+                if not api_key:
+                    raise RuntimeError("Zhipu API key not configured.")
+                client = ZhipuAiClient(api_key=api_key)
+                args = {
+                    "model": model,
+                    "prompt": prompt,
+                    "quality": kwargs.get("quality", "quality"),
+                    "with_audio": kwargs.get("with_audio", True),
+                    "size": kwargs.get("size", "1920x1080"),
+                    "fps": kwargs.get("fps", 30),
+                }
+                if "image_url" in kwargs and kwargs["image_url"]:
+                    args["image_url"] = kwargs["image_url"]
+                response = client.videos.generations(**args)
+                zhipu_task_id = response.id
+                with self.lock:
+                    self.zhipu_map[local_id] = zhipu_task_id
+                self.update_task(local_id, status="pending")
+            except Exception as e:
+                logger.exception("Failed to submit async task")
+                self.update_task(local_id, status="failed", error=str(e))
+            return local_id
+
+        def _poll_tasks(self):
+            """Background thread polling all pending video tasks."""
+            while True:
+                tasks = []
+                with self.lock:
+                    tasks = list(self.zhipu_map.items())
+                for local_id, zhipu_id in tasks:
+                    try:
+                        api_key = get_zhipu_api_key()
+                        if not api_key:
+                            raise RuntimeError("Zhipu API key missing.")
+                        client = ZhipuAiClient(api_key=api_key)
+                        status_data = client.videos.retrieve_videos_result(zhipu_id)
+                        if hasattr(status_data, 'status') and status_data.status == "succeeded":
+                            result_url = status_data.video_url
+                            self.update_task(local_id, status="completed", progress=100,
+                                             result_url=result_url)
+                            with self.lock:
+                                del self.zhipu_map[local_id]
+                        elif hasattr(status_data, 'status') and status_data.status == "failed":
+                            error = status_data.error if hasattr(status_data, 'error') else "Unknown error"
+                            self.update_task(local_id, status="failed", error=error)
+                            with self.lock:
+                                del self.zhipu_map[local_id]
+                        elif hasattr(status_data, 'status') and status_data.status == "processing":
+                            progress = getattr(status_data, 'progress', 50)
+                            self.update_task(local_id, status="processing", progress=progress)
+                    except Exception as e:
+                        logger.error(f"Polling task {local_id} failed: {e}")
+                time.sleep(5)
+
+        def _start_poller(self):
+            thread = threading.Thread(target=self._poll_tasks, daemon=True)
+            thread.start()
+
+    _task_queue = ZhipuTaskQueue(db_path=str(Path(__file__).parent.parent / "yukti_tasks.db"))
+else:
+    class _DummyQueue:
+        def submit_async(self, *args, **kwargs):
+            raise RuntimeError("Video generation requires zai-sdk and Zhipu API key.")
+        def get_active_tasks(self):
+            return []
+        def get_task(self, task_id):
+            return None
+    _task_queue = _DummyQueue()
 
 # ----------------------------------------------------------------------
-# Public functions to get available services
+# Public task functions
 # ----------------------------------------------------------------------
-def get_available_models() -> List[str]:
-    """Return list of service names that are usable (at least one model available)."""
-    available = []
-    for service in SERVICES:
-        # Check if any model in the service's priority list is available (API key wise)
-        # For simplicity, we assume Zhipu models are available if ZHIPU_AVAILABLE,
-        # and Gemini models if GEMINI_AVAILABLE.
-        # More precise check could be done per model, but we'll keep it simple.
-        if service in ["Yukti‑Flash", "Yukti‑Quantum", "Yukti‑Image", "Yukti‑Video", "Yukti‑Audio"]:
-            if ZHIPU_AVAILABLE:
-                available.append(service)
-        elif service == "Gemini 1.5 Flash":
-            if GEMINI_AVAILABLE:
-                available.append(service)
-    return available
+def get_active_tasks() -> List[Tuple[str, str, str, int]]:
+    return _task_queue.get_active_tasks()
 
-def get_service_config(service: str) -> Optional[Dict[str, Any]]:
-    """Return the service's priority list (for UI display)."""
-    if service in SERVICES:
-        return {"models": SERVICES[service]}
-    return None
+def get_task_status(task_id: str) -> Optional[Dict[str, Any]]:
+    return _task_queue.get_task(task_id)
 
 # ----------------------------------------------------------------------
 # YuktiModel – now tied to a service, selects model per invoke
@@ -364,7 +486,6 @@ class YuktiModel:
         if service not in SERVICES:
             raise ValueError(f"Unknown service: {service}")
         # Determine provider for the service (all models in its list share same provider)
-        # We'll derive from the first model in the list.
         first_model = SERVICES[service][0]
         self.provider = MODELS[first_model]["provider"]
         self.zhipu_api_key = get_zhipu_api_key()
@@ -405,9 +526,8 @@ class YuktiModel:
         elif model_id.startswith("cogview"):
             return client.image(model_id, prompt)
         elif model_id.startswith("cogvideox"):
-            # Async video should be handled elsewhere, but if sync? Actually video is async.
-            # For simplicity, we assume video is handled via the async queue.
-            raise NotImplementedError("Video should be handled by async queue")
+            # Video is async; if we reach here, it's a sync call error
+            raise NotImplementedError("Video should be handled via async queue")
         elif model_id in ["glm-tts", "glm-tts-clone"]:
             voice = kwargs.get("voice", "female")
             return client.audio(model_id, prompt, voice=voice)
@@ -428,13 +548,38 @@ def load_model(service: str) -> YuktiModel:
     return YuktiModel(service)
 
 # ----------------------------------------------------------------------
-# Task queue functions (unchanged, but you may want to pass model_key)
+# Public configuration functions
 # ----------------------------------------------------------------------
-# (Assume _task_queue exists as before, with submit_async expecting a model_key)
-# We'll need to adapt the async queue to work with model selection – maybe pass the service and let it select a video model.
-# For now, we'll keep it simple and assume the async queue uses a fixed model.
-# If we want dynamic selection for video, we'd need to integrate similarly.
-# But for brevity, we'll leave the async queue as is.
+def get_available_models() -> List[str]:
+    """Return list of service names that are usable (at least one model available)."""
+    available = []
+    for service in SERVICES:
+        if service in ["Yukti‑Flash", "Yukti‑Quantum", "Yukti‑Image", "Yukti‑Video", "Yukti‑Audio"]:
+            if ZHIPU_AVAILABLE:
+                available.append(service)
+        elif service == "Gemini 1.5 Flash":
+            if GEMINI_AVAILABLE:
+                available.append(service)
+    return available
+
+def get_service_config(service: str) -> Optional[Dict[str, Any]]:
+    """Return the service's priority list (for UI display)."""
+    if service in SERVICES:
+        return {"models": SERVICES[service]}
+    return None
+
+def get_model_config(service: str) -> Optional[Dict[str, Any]]:
+    """
+    Return the configuration of the first model in the service's priority list.
+    Used by think.py to determine model type (sync/async) and other metadata.
+    """
+    if service not in SERVICES:
+        return None
+    first_model = SERVICES[service][0]
+    config = MODELS[first_model].copy()
+    config['service'] = service
+    config['model_key'] = first_model
+    return config
 
 # ----------------------------------------------------------------------
 # Export symbols
@@ -442,7 +587,10 @@ def load_model(service: str) -> YuktiModel:
 __all__ = [
     "get_available_models",
     "get_service_config",
+    "get_model_config",
     "load_model",
+    "get_active_tasks",
+    "get_task_status",
     "ZHIPU_AVAILABLE",
     "GEMINI_AVAILABLE",
 ]

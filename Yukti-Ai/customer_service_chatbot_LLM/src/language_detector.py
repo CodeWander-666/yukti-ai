@@ -3,6 +3,7 @@ Yukti AI – High‑End Language & Tone Detector
 Handles 1000+ scenarios: Hindi, English, Hinglish, code‑switching, explicit instructions,
 tone detection (romantic, angry, sensual, explicit, etc.), and full user freedom.
 No censorship – respects user's desired language and tone completely.
+Returns dictionary with keys: 'language', 'confidence', 'method', 'tone', 'explicit_instruction'.
 """
 
 import re
@@ -308,19 +309,21 @@ def detect_tone(text: str) -> Dict[str, float]:
 def detect_language(text: str) -> Dict[str, Any]:
     """
     Comprehensive language detection with 1000+ scenario coverage.
-    Returns dict with language code, confidence, method, tone, etc.
+    Returns dict with language code, confidence, method, tone, explicit instruction.
+    Keys: 'language', 'confidence', 'method', 'tone', 'explicit_instruction'
     """
     if not text or not text.strip():
         return {
-            'code': 'en',
+            'language': 'en',
             'confidence': 1.0,
             'method': 'default',
             'tone': {'neutral': 1.0},
             'explicit_instruction': None
         }
     
+    # Initialize result with default values
     result = {
-        'code': 'en',
+        'language': 'en',
         'confidence': 0.0,
         'method': 'fallback',
         'tone': detect_tone(text),
@@ -329,13 +332,14 @@ def detect_language(text: str) -> Dict[str, Any]:
     
     # Priority 1: Explicit user instruction overrides everything
     if result['explicit_instruction']:
-        result['method'] = 'explicit_instruction'
+        result['language'] = result['explicit_instruction']
         result['confidence'] = 1.0
+        result['method'] = 'explicit_instruction'
         return result
     
     # Priority 2: Devanagari script = pure Hindi
     if has_devanagari(text):
-        result['code'] = 'hi'
+        result['language'] = 'hi'
         result['confidence'] = 1.0
         result['method'] = 'script'
         return result
@@ -343,7 +347,7 @@ def detect_language(text: str) -> Dict[str, Any]:
     # Priority 3: Hinglish detection
     is_hing, conf = is_hinglish(text)
     if is_hing:
-        result['code'] = 'hinglish'
+        result['language'] = 'hinglish'
         result['confidence'] = conf
         result['method'] = 'wordlist'
         return result
@@ -352,13 +356,13 @@ def detect_language(text: str) -> Dict[str, Any]:
     if TRANSFORMERS_AVAILABLE:
         trans_result = _transformer_detector.detect_language(text)
         if trans_result['confidence'] > 0.7:
-            result['code'] = trans_result['code']
+            result['language'] = trans_result['code']
             result['confidence'] = trans_result['confidence']
             result['method'] = trans_result['method']
             return result
     
     # Priority 5: Default to English
-    result['code'] = 'en'
+    result['language'] = 'en'
     result['confidence'] = 0.8
     result['method'] = 'default'
     return result
@@ -368,7 +372,7 @@ def detect_language(text: str) -> Dict[str, Any]:
 # ----------------------------------------------------------------------
 def get_language_code(text: str) -> str:
     """Quickly get language code only."""
-    return detect_language(text)['code']
+    return detect_language(text)['language']
 
 def get_response_language(prompt: str, user_preferred: Optional[str] = None) -> str:
     """
@@ -386,7 +390,7 @@ def get_response_language(prompt: str, user_preferred: Optional[str] = None) -> 
         return user_preferred
     
     # Otherwise, use detected language
-    return detected['code']
+    return detected['language']
 
 # ----------------------------------------------------------------------
 # Test with 1000+ scenarios (example)
@@ -451,7 +455,7 @@ if __name__ == "__main__":
     for i, text in enumerate(test_cases, 1):
         result = detect_language(text)
         print(f"\n[{i}] Input: {text[:60]}{'...' if len(text) > 60 else ''}")
-        print(f"    Language: {result['code']} (conf: {result['confidence']:.2f}, method: {result['method']})")
+        print(f"    Language: {result['language']} (conf: {result['confidence']:.2f}, method: {result['method']})")
         if result['explicit_instruction']:
             print(f"    Explicit instruction: {result['explicit_instruction']}")
         top_tone = max(result['tone'].items(), key=lambda x: x[1])

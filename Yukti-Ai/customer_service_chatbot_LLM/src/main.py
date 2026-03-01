@@ -2,9 +2,10 @@ import os
 import sys
 import time
 import logging
+import tempfile
 from pathlib import Path
 
-# Add project root to path (ensures imports work on Streamlit Cloud)
+# Force project root into path
 PROJECT_ROOT = Path(__file__).parent.parent.parent.parent
 if str(PROJECT_ROOT) not in sys.path:
     sys.path.insert(0, str(PROJECT_ROOT))
@@ -15,7 +16,7 @@ import requests
 from langchain_core.documents import Document
 from langchain_community.vectorstores import FAISS
 
-# Local imports (must be in same directory)
+# Local imports
 from langchain_helper import get_embeddings, VECTORDB_PATH, BASE_DIR, create_vector_db
 from think import think
 from model_manager import (
@@ -36,45 +37,46 @@ logger = logging.getLogger(__name__)
 # ----------------------------------------------------------------------
 st.set_page_config(
     page_title="Yukti AI",
-    page_icon="",
+    page_icon="✨",  # could be changed but we keep it simple
     layout="wide",
     initial_sidebar_state="expanded"
 )
 
 # ----------------------------------------------------------------------
-# Premium Futuristic CSS with 3D buttons and neon sticker
+# Cyberpunk CSS with neon pink/blue, 3D effects, and custom dropdown styling
 # ----------------------------------------------------------------------
 st.markdown("""
 <style>
-    /* Global theme */
+    /* Global cyberpunk theme */
     .stApp {
-        background: linear-gradient(135deg, #0a0b1a 0%, #14152b 100%);
+        background: linear-gradient(135deg, #0d0b1a 0%, #1a1a2f 100%);
         color: #e0e0ff;
     }
-    /* Chat messages */
+    /* Chat messages with neon glow */
     .stChatMessage {
         border-radius: 20px;
         padding: 1rem;
         margin-bottom: 1rem;
         backdrop-filter: blur(10px);
-        border: 1px solid rgba(255,255,255,0.1);
-        box-shadow: 0 8px 32px rgba(0,0,0,0.3);
+        border: 1px solid rgba(255,0,255,0.3);
+        box-shadow: 0 0 20px rgba(255,0,255,0.3), 0 8px 32px rgba(0,0,0,0.5);
     }
     .stChatMessage[data-testid="user-message"] {
-        background: rgba(255,255,255,0.05);
-        border-left: 4px solid #00f2fe;
+        background: rgba(255,0,255,0.05);
+        border-left: 4px solid #ff00ff;
     }
     .stChatMessage[data-testid="assistant-message"] {
-        background: rgba(20,40,80,0.3);
-        border-left: 4px solid #ff6a88;
+        background: rgba(0,255,255,0.05);
+        border-left: 4px solid #00ffff;
     }
     /* Sidebar */
     .css-1d391kg {
-        background: rgba(10,10,20,0.8);
+        background: rgba(10,10,20,0.9);
         backdrop-filter: blur(10px);
-        border-right: 1px solid rgba(255,255,255,0.05);
+        border-right: 1px solid #ff00ff;
+        box-shadow: -5px 0 20px rgba(255,0,255,0.3);
     }
-    /* Premium 3D Buttons */
+    /* 3D buttons */
     .stButton > button {
         background: linear-gradient(145deg, #1e1e3f, #2a2a5a);
         border: none;
@@ -83,52 +85,56 @@ st.markdown("""
         color: #fff;
         font-weight: 600;
         font-size: 1rem;
-        box-shadow: 0 5px 0 #0b0b1a, 0 10px 20px rgba(0,0,0,0.4);
+        box-shadow: 0 5px 0 #0b0b1a, 0 10px 20px rgba(255,0,255,0.4);
         transition: all 0.1s ease;
         transform: translateY(0);
         margin: 0.5rem 0;
         width: 100%;
         cursor: pointer;
-        border-bottom: 2px solid #4f4f9f;
+        border-bottom: 2px solid #ff00ff;
     }
     .stButton > button:hover {
         transform: translateY(-2px);
-        box-shadow: 0 7px 0 #0b0b1a, 0 15px 25px rgba(0,0,0,0.5);
+        box-shadow: 0 7px 0 #0b0b1a, 0 15px 25px rgba(0,255,255,0.5);
         background: linear-gradient(145deg, #2a2a5a, #3a3a7a);
     }
     .stButton > button:active {
         transform: translateY(4px);
-        box-shadow: 0 2px 0 #0b0b1a, 0 8px 15px rgba(0,0,0,0.4);
+        box-shadow: 0 2px 0 #0b0b1a, 0 8px 15px rgba(255,0,255,0.4);
     }
-    /* File uploader styling */
+    /* File uploader */
     .stFileUploader {
         background: rgba(30,30,60,0.5);
         border-radius: 15px;
         padding: 1rem;
-        border: 1px dashed #5a5a9a;
+        border: 1px dashed #ff00ff;
+        box-shadow: 0 0 15px rgba(255,0,255,0.3);
     }
-    /* Compact images in chat */
+    /* Compact images */
     .stImage {
         max-width: 300px;
         max-height: 300px;
         border-radius: 12px;
-        border: 2px solid rgba(255,255,255,0.2);
+        border: 2px solid #00ffff;
+        box-shadow: 0 0 15px #00ffff;
         margin: 0.5rem 0;
     }
     /* Progress bar */
     .stProgress > div > div > div {
-        background: linear-gradient(90deg, #00f2fe, #ff6a88);
+        background: linear-gradient(90deg, #ff00ff, #00ffff);
     }
     /* Neon URL Sticker */
     .url-wrapper {
         display: flex;
         align-items: center;
         gap: 12px;
-        background: var(--bg-dark);
+        background: #1a1a1a;
         padding: 10px 20px;
         border-radius: 8px;
         font-family: 'Inter', sans-serif;
         margin-bottom: 1rem;
+        border: 1px solid #00ffff;
+        box-shadow: 0 0 15px #00ffff;
     }
     .neon-sticker {
         font-size: 0.7rem;
@@ -139,9 +145,9 @@ st.markdown("""
         border-radius: 4px;
         text-transform: uppercase;
         letter-spacing: 1px;
-        border: 1.5px solid var(--neon-color);
-        box-shadow: 0 0 5px var(--neon-color), inset 0 0 5px var(--neon-color);
-        text-shadow: 0 0 2px #fff, 0 0 8px var(--neon-color);
+        border: 1.5px solid #ff00ff;
+        box-shadow: 0 0 5px #ff00ff, inset 0 0 5px #ff00ff;
+        text-shadow: 0 0 2px #fff, 0 0 8px #ff00ff;
         user-select: none;
         animation: neon-pulse 1.5s infinite alternate;
     }
@@ -156,11 +162,24 @@ st.markdown("""
     }
     @keyframes neon-pulse {
         from { opacity: 1; }
-        to { opacity: 0.8; box-shadow: 0 0 10px var(--neon-color), inset 0 0 8px var(--neon-color); }
+        to { opacity: 0.8; box-shadow: 0 0 15px #ff00ff, inset 0 0 8px #ff00ff; }
     }
-    :root {
-        --neon-color: #00ffcc;
-        --bg-dark: #1a1a1a;
+    /* Custom 3D dropdown (selectbox) */
+    .stSelectbox > div > div {
+        background: linear-gradient(145deg, #1e1e3f, #2a2a5a) !important;
+        border: 1px solid #ff00ff !important;
+        border-radius: 15px !important;
+        color: white !important;
+        box-shadow: 0 5px 0 #0b0b1a, 0 10px 20px rgba(255,0,255,0.3) !important;
+        transition: all 0.1s ease;
+    }
+    .stSelectbox > div > div:hover {
+        transform: translateY(-2px);
+        box-shadow: 0 7px 0 #0b0b1a, 0 15px 25px rgba(0,255,255,0.4) !important;
+    }
+    /* Dropdown options */
+    .stSelectbox > div > div > div {
+        color: white !important;
     }
     /* Hide Streamlit branding */
     #MainMenu {visibility: hidden;}
@@ -169,10 +188,10 @@ st.markdown("""
 """, unsafe_allow_html=True)
 
 # ----------------------------------------------------------------------
-# Title and subtitle
+# Title with neon effect
 # ----------------------------------------------------------------------
-st.title("Yukti AI")
-st.caption("Your Futuristic Cognitive Companion")
+st.markdown("<h1 style='text-align: center; text-shadow: 0 0 10px #ff00ff, 0 0 20px #00ffff;'>Yukti AI</h1>", unsafe_allow_html=True)
+st.markdown("<p style='text-align: center; color: #aaa;'>Your Futuristic Cognitive Companion</p>", unsafe_allow_html=True)
 
 # ----------------------------------------------------------------------
 # Session state initialization
@@ -207,7 +226,6 @@ SOURCES = [{
 # Helper functions
 # ----------------------------------------------------------------------
 def load_all_documents():
-    """Load documents from all sources with robust error handling."""
     docs = []
     for src in SOURCES:
         if src["type"] != "csv":
@@ -265,7 +283,6 @@ def load_all_documents():
     return docs
 
 def rebuild_knowledge_base():
-    """Rebuild FAISS index from all sources."""
     with st.spinner("Loading documents..."):
         docs = load_all_documents()
         if docs is None:
@@ -288,7 +305,6 @@ def rebuild_knowledge_base():
             return False
 
 def stream_response(placeholder, full_text, delay=0.02):
-    """Simulate letter‑by‑letter streaming."""
     if not full_text or not isinstance(full_text, str):
         placeholder.markdown("")
         return
@@ -305,11 +321,9 @@ def stream_response(placeholder, full_text, delay=0.02):
         placeholder.markdown(full_text)
 
 def render_task(task_id):
-    """Display a single task container with progress and controls."""
     task_info = st.session_state.tasks.get(task_id)
     if not task_info:
         return
-
     with st.container():
         cols = st.columns([3, 1])
         with cols[0]:
@@ -347,16 +361,17 @@ with st.sidebar:
     st.markdown("""
     <div class="url-wrapper">
       <span class="neon-sticker">YuktiAI</span>
-      <a href="" target="_blank" class="url-text"></a>
+      <a href="https://yukti.ai" target="_blank" class="url-text">https://yukti.ai</a>
     </div>
     """, unsafe_allow_html=True)
     st.divider()
 
-    st.markdown("## Brain")
+    st.markdown("## 🧠 Brain")
 
-    # Model selector – with non‑empty label hidden
+    # Model selector – 3D dropdown with Yukti names only (no GLM exposed)
     model_options = get_available_models()
-    display_names = [f"{m} – {MODELS[m]['description']}" for m in model_options]
+    # Create display names with description
+    display_names = [f"{m} – {MODELS.get(m, {}).get('description', '')}" for m in model_options]
     selected_display = st.selectbox(
         label="Select model",
         options=display_names,
@@ -364,13 +379,14 @@ with st.sidebar:
         key="model_display",
         label_visibility="collapsed"
     )
+    # Extract actual model name from display string (first part before " – ")
     selected_model = model_options[display_names.index(selected_display)]
     st.session_state.selected_model = selected_model
 
     # File upload area (visible only when relevant)
     uploaded_file = None
     if selected_model in ["Yukti‑Video", "Yukti‑Image", "Yukti‑Audio"]:
-        st.markdown("### Attach File")
+        st.markdown("### 📎 Attach File")
         if selected_model == "Yukti‑Video":
             uploaded_file = st.file_uploader("Upload image (optional)", type=["png", "jpg", "jpeg"])
         elif selected_model == "Yukti‑Image":
@@ -381,20 +397,20 @@ with st.sidebar:
     st.divider()
 
     # Knowledge Base
-    st.markdown("### Knowledge Base")
-    if st.button("Update", use_container_width=True):
+    st.markdown("### 📚 Knowledge Base")
+    if st.button("🔄 Update", use_container_width=True):
         rebuild_knowledge_base()
     if st.session_state.knowledge_base_ready:
-        st.markdown("**Active**")
+        st.markdown("✅ **Active**")
     else:
-        st.markdown("**Not built**")
+        st.markdown("⚠️ **Not built**")
 
     st.divider()
 
     # Active tasks (only if Zhipu async available)
     if ZHIPU_AVAILABLE:
-        st.markdown("### Tasks")
-        if st.button("Refresh Tasks", use_container_width=True):
+        st.markdown("### 📋 Tasks")
+        if st.button("⟳ Refresh Tasks", use_container_width=True):
             st.rerun()
         try:
             active_tasks = get_active_tasks()
@@ -420,7 +436,7 @@ with st.sidebar:
         st.divider()
 
     # Clear Conversation
-    if st.button("Clear Chat", use_container_width=True):
+    if st.button("🗑️ Clear Chat", use_container_width=True):
         st.session_state.messages = [
             {"role": "assistant", "content": "Hello! I'm Yukti AI. How can I help you today?"}
         ]
@@ -432,7 +448,7 @@ with st.sidebar:
 for msg in st.session_state.messages:
     with st.chat_message(msg["role"]):
         st.markdown(msg["content"])
-        # If the message contains generated media, display it compactly
+        # Display persisted media
         if "media" in msg:
             for media in msg["media"]:
                 if media["type"] == "image":
@@ -461,16 +477,14 @@ if prompt := st.chat_input("Ask me anything..."):
             model_key = st.session_state.selected_model
             config = MODELS.get(model_key, {})
 
-            # For generation models that may need uploaded file
             extra_kwargs = {}
             if uploaded_file is not None:
-                import tempfile
                 with tempfile.NamedTemporaryFile(delete=False, suffix=Path(uploaded_file.name).suffix) as tmp:
                     tmp.write(uploaded_file.getvalue())
-                    extra_kwargs["image_url"] = tmp.name  # or file path, adjust based on API
+                    extra_kwargs["image_url"] = tmp.name
 
-            # Check if knowledge base is needed (for text models)
-            if config.get("type") == "sync" and config.get("model") in ["glm-4-flash", "glm-5"]:
+            # For text models that need knowledge base
+            if config.get("type") == "sync" and model_key in ["Yukti‑Flash", "Yukti‑Quantum"]:
                 if not st.session_state.knowledge_base_ready:
                     full_response = "The knowledge base is not ready. Please click 'Update' in the sidebar first."
                     response_placeholder.markdown(full_response)
@@ -487,12 +501,12 @@ if prompt := st.chat_input("Ask me anything..."):
                 model = load_model(model_key)
                 with st.spinner("Generating..."):
                     if model_key == "Yukti‑Audio":
-                        voice = "female"
+                        voice = "female"  # glm-4-voice may not need voice, but keep for compatibility
                         audio_path = model.invoke(prompt, voice=voice, **extra_kwargs)
                         with open(audio_path, "rb") as f:
                             audio_bytes = f.read()
                         st.audio(audio_bytes, format="audio/wav")
-                        st.download_button("Download Audio", data=audio_bytes, file_name="yukti_audio.wav")
+                        st.download_button("📥 Download Audio", data=audio_bytes, file_name="yukti_audio.wav")
                         full_response = "Audio generated."
                         result = {"type": "sync", "format": "audio"}
                         media.append({"type": "audio", "url": audio_path})
@@ -500,7 +514,7 @@ if prompt := st.chat_input("Ask me anything..."):
                         image_url = model.invoke(prompt, **extra_kwargs)
                         st.image(image_url, use_container_width=False, width=300)
                         img_data = requests.get(image_url).content
-                        st.download_button("Download Image", data=img_data, file_name="yukti_image.png")
+                        st.download_button("📥 Download Image", data=img_data, file_name="yukti_image.png")
                         full_response = "Image generated."
                         result = {"type": "sync", "format": "image"}
                         media.append({"type": "image", "url": image_url})
@@ -524,7 +538,7 @@ if prompt := st.chat_input("Ask me anything..."):
                         with st.spinner("Thinking..."):
                             result = think(prompt, history, model_key)
 
-            # Handle result from think (if any)
+            # Handle result from think
             if result and result.get("type") == "async":
                 task_id = result.get("task_id")
                 st.info(f"Task {task_id} submitted. Check sidebar for progress.")
@@ -533,6 +547,7 @@ if prompt := st.chat_input("Ask me anything..."):
                 if result.get("monologue"):
                     with st.expander("Show thinking process"):
                         st.markdown(result["monologue"])
+                # Stream the answer and then save the final text
                 stream_response(response_placeholder, answer, delay=0.03)
                 if result.get("sources"):
                     with st.expander("View source documents"):

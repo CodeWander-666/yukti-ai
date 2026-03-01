@@ -1,7 +1,7 @@
 """
-Yukti AI – Model Manager (Ultimate Production Edition)
-Handles all Yukti models with concurrency‑aware selection, service‑based priority,
-Gemini integration, and async video queue.
+Yukti AI – Model Manager (Final Production Edition)
+Handles all Yukti services with concurrency‑aware model selection, Gemini as a separate service,
+async video queue, and full compatibility with existing files.
 """
 
 import logging
@@ -44,7 +44,7 @@ ZHIPU_BASE_URL = "https://api.z.ai/api/paas/v4/"
 # ----------------------------------------------------------------------
 # Individual Model Configurations (with concurrency limits)
 # ----------------------------------------------------------------------
-MODELS = {
+_MODEL_REGISTRY = {
     # Text models (Zhipu)
     "search-pro": {
         "model_id": "search-pro",
@@ -57,7 +57,7 @@ MODELS = {
         "model_id": "glm-realtime-air",
         "provider": "zhipu",
         "type": "sync",
-        "concurrency_limit": 30,   # estimate based on similar models
+        "concurrency_limit": 30,
         "description": "Realtime air model"
     },
     "autoglm-phone-multilingual": {
@@ -163,7 +163,7 @@ MODELS = {
     },
     # Gemini models (separate)
     "gemini-1.5-flash": {
-        "model_id": "gemini-1.5-flash",   # adjust to valid model name
+        "model_id": "gemini-1.5-flash",   # adjust to valid model name if needed
         "provider": "gemini",
         "type": "sync",
         "concurrency_limit": 60,           # not enforced, just placeholder
@@ -203,7 +203,7 @@ SERVICES = {
         "glm-tts",
         "glm-tts-clone"
     ],
-    "Gemini 1.5 Flash": [   # direct Gemini model
+    "Gemini 1.5 Flash": [   # direct Gemini service
         "gemini-1.5-flash"
     ]
 }
@@ -243,7 +243,7 @@ class ConcurrencyTracker:
             return self.counters.get(model_key, 0)
 
     def can_use(self, model_key: str) -> bool:
-        limit = MODELS[model_key].get("concurrency_limit", float('inf'))
+        limit = _MODEL_REGISTRY[model_key].get("concurrency_limit", float('inf'))
         return self.current(model_key) < limit
 
 concurrency = ConcurrencyTracker()
@@ -326,7 +326,7 @@ class GeminiClient:
             raise RuntimeError(f"Gemini error: {e}")
 
 # ----------------------------------------------------------------------
-# Async Task Queue for Video (unchanged from earlier)
+# Async Task Queue for Video
 # ----------------------------------------------------------------------
 if ZAI_AVAILABLE and ZHIPU_AVAILABLE:
     class ZhipuTaskQueue:
@@ -478,6 +478,18 @@ def get_task_status(task_id: str) -> Optional[Dict[str, Any]]:
     return _task_queue.get_task(task_id)
 
 # ----------------------------------------------------------------------
+# Build backward‑compatible MODELS dictionary for main.py
+# ----------------------------------------------------------------------
+MODELS = {}
+for service, models in SERVICES.items():
+    first_model = models[0]
+    desc = _MODEL_REGISTRY[first_model]["description"]
+    MODELS[service] = {
+        "description": desc,
+        "models": models   # optional, not used by main.py but could be useful
+    }
+
+# ----------------------------------------------------------------------
 # YuktiModel – now tied to a service, selects model per invoke
 # ----------------------------------------------------------------------
 class YuktiModel:
@@ -487,7 +499,7 @@ class YuktiModel:
             raise ValueError(f"Unknown service: {service}")
         # Determine provider for the service (all models in its list share same provider)
         first_model = SERVICES[service][0]
-        self.provider = MODELS[first_model]["provider"]
+        self.provider = _MODEL_REGISTRY[first_model]["provider"]
         self.zhipu_api_key = get_zhipu_api_key()
         self.gemini_api_key = get_google_api_key()
 
@@ -519,7 +531,7 @@ class YuktiModel:
 
     def _call_zhipu_model(self, model_key: str, prompt: str, **kwargs) -> Any:
         client = ZhipuClient(self.zhipu_api_key)
-        model_id = MODELS[model_key]["model_id"]
+        model_id = _MODEL_REGISTRY[model_key]["model_id"]
         if model_id in ["glm-4-flash", "glm-5", "glm-4-plus", "glm-z1-airx", "search-pro",
                         "glm-realtime-air", "autoglm-phone-multilingual", "glm-z1-air"]:
             return client.text(model_id, prompt, temperature=kwargs.get("temperature", 0.1))
@@ -538,7 +550,7 @@ class YuktiModel:
         if not GEMINI_AVAILABLE:
             raise RuntimeError("Gemini not available")
         client = GeminiClient(self.gemini_api_key)
-        model_id = MODELS[model_key]["model_id"]
+        model_id = _MODEL_REGISTRY[model_key]["model_id"]
         return client.text(model_id, prompt, temperature=kwargs.get("temperature", 0.1))
 
 # ----------------------------------------------------------------------
@@ -576,7 +588,7 @@ def get_model_config(service: str) -> Optional[Dict[str, Any]]:
     if service not in SERVICES:
         return None
     first_model = SERVICES[service][0]
-    config = MODELS[first_model].copy()
+    config = _MODEL_REGISTRY[first_model].copy()
     config['service'] = service
     config['model_key'] = first_model
     return config
@@ -593,4 +605,5 @@ __all__ = [
     "get_task_status",
     "ZHIPU_AVAILABLE",
     "GEMINI_AVAILABLE",
+    "MODELS",
 ]

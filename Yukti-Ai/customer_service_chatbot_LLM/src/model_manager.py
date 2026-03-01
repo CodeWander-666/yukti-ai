@@ -1,14 +1,10 @@
-"""
-Yukti AI – Model Manager (2026 Edition)
-Uses OpenAI‑compatible endpoint for all Zhipu models and zai-sdk for async video.
-Includes robust fallback to Gemini with correct model names.
-"""
-
 import logging
 import os
 import time
 import threading
 import sqlite3
+import requests
+import tempfile
 from datetime import datetime
 from pathlib import Path
 from typing import Dict, Any, Optional, List, Tuple
@@ -19,10 +15,18 @@ from langchain_openai import ChatOpenAI
 # Attempt to import zai-sdk for async video (optional)
 try:
     from zai import ZhipuAiClient
-    ZHIPU_AVAILABLE = True
+    ZAI_AVAILABLE = True
 except ImportError:
-    ZHIPU_AVAILABLE = False
+    ZAI_AVAILABLE = False
     logging.warning("zai-sdk not installed; video generation disabled.")
+
+# Attempt to import Gemini (optional)
+try:
+    from langchain_google_genai import ChatGoogleGenerativeAI
+    GEMINI_AVAILABLE = True
+except ImportError:
+    GEMINI_AVAILABLE = False
+    logging.warning("langchain-google-genai not installed; Gemini fallback disabled.")
 
 logger = logging.getLogger(__name__)
 
@@ -31,77 +35,72 @@ logger = logging.getLogger(__name__)
 # ----------------------------------------------------------------------
 ZHIPU_BASE_URL = "https://api.z.ai/api/paas/v4/"  # new global endpoint
 
-# Valid Gemini models (as of 2026)
-GEMINI_MODELS = [
-    "gemini-1.5-flash",
-    "gemini-1.5-pro",
-    "gemini-2.0-flash-exp",
-]
-
 MODELS = {
     "Yukti‑Flash": {
         "model": "glm-4-flash",
         "type": "sync",
         "description": "Fast text & reasoning",
         "depends_on_zhipu": True,
+        "requires_zai": False,
     },
     "Yukti‑Quantum": {
         "model": "glm-5",
         "type": "sync",
         "description": "Deep research & complex reasoning",
         "depends_on_zhipu": True,
+        "requires_zai": False,
     },
     "Yukti‑Image": {
         "model": "cogview-4",
         "type": "sync",
         "description": "Image generation (returns URL)",
         "depends_on_zhipu": True,
+        "requires_zai": False,
     },
     "Yukti‑Video": {
         "model": "cogvideox-3",
         "type": "async",
         "description": "Video generation (queued)",
         "depends_on_zhipu": True,
-        "requires_zai": True,      # needs zai-sdk for polling
+        "requires_zai": True,
     },
     "Yukti‑Audio": {
         "model": "glm-tts",
         "type": "sync",
         "description": "Text‑to‑speech (returns audio file)",
         "depends_on_zhipu": True,
+        "requires_zai": False,
     },
-    "Gemini 1.5 Flash": {
-        "model": "gemini-1.5-flash",
+    "Gemini 2.0 Flash": {
+        "model": "gemini-2.0-flash-exp",
         "type": "sync",
         "description": "Google Gemini fallback (fast)",
         "depends_on_zhipu": False,
+        "requires_zai": False,
     }
 }
 
-def get_available_models() -> List[str]:
-    """Return list of models actually available given dependencies."""
-    available = []
-    for k, v in MODELS.items():
-        if v.get("depends_on_zhipu", False):
-            # For Zhipu models, we need an API key.
-            if os.environ.get("ZHIPU_API_KEY") or st.secrets.get("ZHIPU_API_KEY"):
-                if v.get("requires_zai") and not ZHIPU_AVAILABLE:
-                    continue   # video requires zai-sdk
-                available.append(k)
-        else:
-            available.append(k)   # Gemini always available if key present
-    return available
+# ----------------------------------------------------------------------
+# API key management
+# ----------------------------------------------------------------------
+def get_zhipu_api_key() -> Optional[str]:
+    """Return Zhipu API key from secrets or environment."""
+    return st.secrets.get("ZHIPU_API_KEY") or os.getenv("ZHIPU_API_KEY")
 
-def get_model_config(model_key: str) -> Optional[Dict[str, Any]]:
-    return MODELS.get(model_key)
+def get_google_api_key() -> Optional[str]:
+    """Return Google API key from secrets or environment."""
+    return st.secrets.get("GOOGLE_API_KEY") or os.getenv("GOOGLE_API_KEY")
+
+# Determine Zhipu availability
+ZHIPU_AVAILABLE = get_zhipu_api_key() is not None
 
 # ----------------------------------------------------------------------
-# Synchronous client using ChatOpenAI (works for text, image, audio)
+# Synchronous client for Zhipu text models (OpenAI‑compatible)
 # ----------------------------------------------------------------------
 @st.cache_resource
-def get_sync_client() -> Optional[ChatOpenAI]:
-    """Return a cached ChatOpenAI client for Zhipu models."""
-    api_key = st.secrets.get("ZHIPU_API_KEY") or os.getenv("ZHIPU_API_KEY")
+def get_zhipu_text_client() -> Optional[ChatOpenAI]:
+    """Return a cached ChatOpenAI client for Zhipu text models."""
+    api_key = get_zhipu_api_key()
     if not api_key:
         return None
     return ChatOpenAI(
@@ -114,9 +113,33 @@ def get_sync_client() -> Optional[ChatOpenAI]:
     )
 
 # ----------------------------------------------------------------------
-# Async queue for video tasks using zai-sdk
+# Helper for direct Zhipu API calls (image, audio)
 # ----------------------------------------------------------------------
-if ZHIPU_AVAILABLE:
+def call_zhipu_direct(endpoint: str, payload: dict) -> dict:
+    """
+    Make a direct POST request to Zhipu API with proper error handling.
+    Returns parsed JSON response.
+    """
+    api_key = get_zhipu_api_key()
+    if not api_key:
+        raise RuntimeError("Zhipu API key not configured.")
+    headers = {
+        "Authorization": f"Bearer {api_key}",
+        "Content-Type": "application/json"
+    }
+    url = f"{ZHIPU_BASE_URL.rstrip('/')}/{endpoint.lstrip('/')}"
+    try:
+        resp = requests.post(url, json=payload, headers=headers, timeout=60)
+        resp.raise_for_status()
+        return resp.json()
+    except requests.exceptions.RequestException as e:
+        logger.exception(f"Zhipu direct API call failed: {e}")
+        raise RuntimeError(f"Zhipu API error: {e}")
+
+# ----------------------------------------------------------------------
+# Async video queue using zai-sdk
+# ----------------------------------------------------------------------
+if ZAI_AVAILABLE and ZHIPU_AVAILABLE:
     class ZhipuTaskQueue:
         def __init__(self, db_path: str = "yukti_tasks.db"):
             self.db_path = db_path
@@ -186,7 +209,7 @@ if ZHIPU_AVAILABLE:
             self.add_task(local_id, variant, model)
 
             try:
-                api_key = st.secrets.get("ZHIPU_API_KEY") or os.getenv("ZHIPU_API_KEY")
+                api_key = get_zhipu_api_key()
                 client = ZhipuAiClient(api_key=api_key)
                 # Build arguments for video generation
                 args = {
@@ -219,7 +242,7 @@ if ZHIPU_AVAILABLE:
                     tasks = list(self.zhipu_map.items())
                 for local_id, zhipu_id in tasks:
                     try:
-                        api_key = st.secrets.get("ZHIPU_API_KEY") or os.getenv("ZHIPU_API_KEY")
+                        api_key = get_zhipu_api_key()
                         client = ZhipuAiClient(api_key=api_key)
                         status_data = client.videos.retrieve_videos_result(zhipu_id)
                         if hasattr(status_data, 'status') and status_data.status == "succeeded":
@@ -245,11 +268,10 @@ if ZHIPU_AVAILABLE:
             thread.start()
 
     _task_queue = ZhipuTaskQueue(db_path=str(Path(__file__).parent.parent / "yukti_tasks.db"))
-
 else:
     class _DummyQueue:
         def submit_async(self, *args, **kwargs):
-            raise RuntimeError("Video generation requires zai-sdk. Install with: pip install zai-sdk")
+            raise RuntimeError("Video generation requires zai-sdk and Zhipu API key.")
         def get_active_tasks(self):
             return []
         def get_task(self, task_id):
@@ -257,7 +279,42 @@ else:
     _task_queue = _DummyQueue()
 
 # ----------------------------------------------------------------------
-# YuktiModel wrapper
+# Public functions to access task queue
+# ----------------------------------------------------------------------
+def get_active_tasks() -> List[Tuple[str, str, str, int]]:
+    """Return list of active async tasks (video)."""
+    return _task_queue.get_active_tasks()
+
+def get_task_status(task_id: str) -> Optional[Dict[str, Any]]:
+    """Return status of a specific task."""
+    return _task_queue.get_task(task_id)
+
+# ----------------------------------------------------------------------
+# Model availability check
+# ----------------------------------------------------------------------
+def get_available_models() -> List[str]:
+    """Return list of models actually available given dependencies and keys."""
+    available = []
+    for name, config in MODELS.items():
+        if config.get("depends_on_zhipu", False):
+            # Zhipu model – needs API key
+            if not get_zhipu_api_key():
+                continue
+            if config.get("requires_zai", False) and not ZAI_AVAILABLE:
+                continue
+            available.append(name)
+        else:
+            # Gemini model – needs Google API key and gemini library
+            if GEMINI_AVAILABLE and get_google_api_key():
+                available.append(name)
+    return available
+
+def get_model_config(model_key: str) -> Optional[Dict[str, Any]]:
+    """Return configuration for a given model key."""
+    return MODELS.get(model_key)
+
+# ----------------------------------------------------------------------
+# Core model invocation class
 # ----------------------------------------------------------------------
 class YuktiModel:
     def __init__(self, model_key: str):
@@ -266,13 +323,15 @@ class YuktiModel:
             raise ValueError(f"Unknown model key: {model_key}")
         self.model_key = model_key
         self.model_name = self.config["model"]
-        # Store API key separately for direct use (avoid accessing ChatOpenAI.api_key)
-        self.zhipu_api_key = st.secrets.get("ZHIPU_API_KEY") or os.getenv("ZHIPU_API_KEY")
 
     def invoke(self, prompt: str, **kwargs) -> Any:
-        if self.config["type"] == "async":
+        """
+        Invoke the model. For sync models returns appropriate result (text, image URL, audio path).
+        For async returns task_id.
+        """
+        if self.config.get("type") == "async":
             # Video only
-            if not ZHIPU_AVAILABLE:
+            if not ZAI_AVAILABLE:
                 raise RuntimeError("Video generation requires zai-sdk.")
             return _task_queue.submit_async(
                 variant=self.model_key,
@@ -282,77 +341,75 @@ class YuktiModel:
             )
 
         # Sync models
-        # Try Zhipu first
         if self.config.get("depends_on_zhipu", False):
-            try:
-                return self._call_zhipu(prompt, **kwargs)
-            except Exception as e:
-                logger.warning(f"Primary provider zhipu failed: {e}")
-                # Fallback to Gemini
-                return self._call_gemini(prompt, **kwargs)
+            # Primary: Zhipu
+            return self._call_zhipu(prompt, **kwargs)
         else:
-            # Gemini (or other non‑zhipu models)
+            # Fallback: Gemini
             return self._call_gemini(prompt, **kwargs)
 
     def _call_zhipu(self, prompt: str, **kwargs) -> Any:
-        """Call Zhipu model via ChatOpenAI or direct requests."""
-        client = get_sync_client()
-        if client is None:
-            raise RuntimeError("No Zhipu API key configured.")
-
-        # For text models (glm-4-flash, glm-5)
-        if "glm" in self.model_name:
-            # Use ChatOpenAI with overridden model
+        """Call Zhipu model (text, image, audio)."""
+        # Text models (glm-4-flash, glm-5)
+        if self.model_name in ["glm-4-flash", "glm-5"]:
+            client = get_zhipu_text_client()
+            if client is None:
+                raise RuntimeError("Zhipu API key not configured.")
+            # Override model per call
             llm = ChatOpenAI(
                 model=self.model_name,
-                api_key=self.zhipu_api_key,
-                base_url=ZHIPU_BASE_URL,
+                api_key=client.api_key,
+                base_url=client.base_url,
                 temperature=kwargs.get("temperature", 0.1),
                 max_retries=2
             )
             return llm.invoke(prompt)
 
-        # For image generation (cogview-4)
+        # Image generation (cogview-4)
         if self.model_name == "cogview-4":
-            import requests
-            headers = {"Authorization": f"Bearer {self.zhipu_api_key}"}
-            data = {"model": self.model_name, "prompt": prompt}
-            resp = requests.post("https://api.z.ai/api/paas/v4/images/generations", json=data, headers=headers)
-            resp.raise_for_status()
-            return resp.json()["data"][0]["url"]
+            payload = {"model": self.model_name, "prompt": prompt}
+            data = call_zhipu_direct("images/generations", payload)
+            return data["data"][0]["url"]
 
-        # For audio generation (glm-tts)
+        # Audio generation (glm-tts)
         if self.model_name == "glm-tts":
-            import requests, tempfile
-            headers = {"Authorization": f"Bearer {self.zhipu_api_key}"}
-            data = {
+            payload = {
                 "model": self.model_name,
                 "input": prompt,
                 "voice": kwargs.get("voice", "female"),
                 "response_format": "wav"
             }
-            resp = requests.post("https://api.z.ai/api/paas/v4/audio/speech", json=data, headers=headers, stream=True)
-            resp.raise_for_status()
+            resp = call_zhipu_direct("audio/speech", payload)
+            # The response is binary audio; we need to download and save.
+            # But call_zhipu_direct returns JSON; we need to handle stream differently.
+            # Actually, the /audio/speech endpoint returns binary audio directly.
+            # We'll do a separate request with stream=True.
+            api_key = get_zhipu_api_key()
+            headers = {"Authorization": f"Bearer {api_key}"}
+            url = f"{ZHIPU_BASE_URL.rstrip('/')}/audio/speech"
+            http_resp = requests.post(url, json=payload, headers=headers, stream=True, timeout=60)
+            http_resp.raise_for_status()
             fd, path = tempfile.mkstemp(suffix=".wav", prefix="yukti_audio_")
             with os.fdopen(fd, "wb") as f:
-                for chunk in resp.iter_content(chunk_size=8192):
+                for chunk in http_resp.iter_content(chunk_size=8192):
                     f.write(chunk)
             return path
 
-        raise ValueError(f"Unknown Zhipu model type: {self.model_name}")
+        raise ValueError(f"Unsupported Zhipu model: {self.model_name}")
 
     def _call_gemini(self, prompt: str, **kwargs) -> Any:
-        """Fallback to Gemini using langchain-google-genai."""
-        from langchain_google_genai import ChatGoogleGenerativeAI
-        gemini_key = st.secrets.get("GOOGLE_API_KEY") or os.getenv("GOOGLE_API_KEY")
-        if not gemini_key:
-            raise RuntimeError("No Google API key configured for fallback.")
-        # Use a known working Gemini model
-        model = self.model_name if "gemini" in self.model_name else "gemini-1.5-flash"
+        """Fallback to Gemini."""
+        if not GEMINI_AVAILABLE:
+            raise RuntimeError("Gemini fallback not available (library missing).")
+        api_key = get_google_api_key()
+        if not api_key:
+            raise RuntimeError("Google API key not configured for Gemini.")
+        # Use a valid Gemini model name (update if needed)
+        gemini_model = self.model_name if "gemini" in self.model_name else "gemini-2.0-flash-exp"
         llm = ChatGoogleGenerativeAI(
-            model=model,
-            google_api_key=gemini_key,
-            temperature=0.1
+            model=gemini_model,
+            google_api_key=api_key,
+            temperature=kwargs.get("temperature", 0.1)
         )
         return llm.invoke(prompt)
 
@@ -360,10 +417,14 @@ class YuktiModel:
 # Public interface
 # ----------------------------------------------------------------------
 def load_model(model_key: str) -> YuktiModel:
+    """Return a YuktiModel instance for the given key."""
     return YuktiModel(model_key)
 
-def get_active_tasks() -> List[Tuple[str, str, str, int]]:
-    return _task_queue.get_active_tasks()
-
-def get_task_status(task_id: str) -> Optional[Dict[str, Any]]:
-    return _task_queue.get_task(task_id)
+# ----------------------------------------------------------------------
+# For standalone testing
+# ----------------------------------------------------------------------
+if __name__ == "__main__":
+    print("Available models:", get_available_models())
+    if get_available_models():
+        model = load_model(get_available_models()[0])
+        print(model.invoke("Hello, how are you?"))

@@ -1,8 +1,3 @@
-#!/usr/bin/env python
-"""
-Standalone script to run the knowledge updater.
-Place this file in the same directory as the 'src' folder.
-"""
 import sys
 import logging
 from pathlib import Path

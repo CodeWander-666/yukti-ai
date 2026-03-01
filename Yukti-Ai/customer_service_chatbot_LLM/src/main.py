@@ -1,6 +1,7 @@
 """
-Yukti AI – Model Manager (2026 Edition)
-Integrates Gemini 3 with fallback and Zhipu GLM-5 via OpenAI-compatible endpoint.
+Yukti AI – Model Manager (Updated Gemini Only)
+Gemini now uses google-genai SDK with dynamic model selection.
+All other logic (Zhipu, concurrency, queue) unchanged.
 """
 
 import logging
@@ -18,15 +19,6 @@ from typing import Dict, Any, Optional, List, Tuple
 import streamlit as st
 from langchain_openai import ChatOpenAI
 
-# New Google GenAI SDK
-try:
-    from google import genai
-    from google.genai import types
-    GEMINI_SDK_AVAILABLE = True
-except ImportError:
-    GEMINI_SDK_AVAILABLE = False
-    logging.warning("google-genai not installed; Gemini models disabled.")
-
 # zai-sdk for video (unchanged)
 try:
     from zai import ZhipuAiClient
@@ -34,6 +26,15 @@ try:
 except ImportError:
     ZAI_AVAILABLE = False
     logging.warning("zai-sdk not installed; video generation disabled.")
+
+# New Google GenAI SDK for Gemini
+try:
+    from google import genai
+    from google.genai import types
+    GEMINI_SDK_AVAILABLE = True
+except ImportError:
+    GEMINI_SDK_AVAILABLE = False
+    logging.warning("google-genai not installed; Gemini models disabled.")
 
 logger = logging.getLogger(__name__)
 
@@ -43,10 +44,9 @@ logger = logging.getLogger(__name__)
 ZHIPU_BASE_URL = "https://open.bigmodel.cn/api/paas/v4"
 
 # ----------------------------------------------------------------------
-# Individual Model Configurations
+# Individual Model Configurations (unchanged)
 # ----------------------------------------------------------------------
 _MODEL_REGISTRY = {
-    # Zhipu models
     "glm-4-flash": {
         "model_id": "glm-4-flash",
         "provider": "zhipu",
@@ -114,7 +114,7 @@ _MODEL_REGISTRY = {
 }
 
 # ----------------------------------------------------------------------
-# Service priority lists
+# Service priority lists (unchanged)
 # ----------------------------------------------------------------------
 SERVICES = {
     "Yukti‑Flash": [
@@ -136,13 +136,13 @@ SERVICES = {
     "Yukti‑Audio": [
         "glm-4-voice"
     ],
-    "Gemini": [  # single service for Gemini
+    "Gemini": [
         "gemini"
     ]
 }
 
 # ----------------------------------------------------------------------
-# API Key Helpers
+# API Key Helpers (unchanged)
 # ----------------------------------------------------------------------
 def get_zhipu_api_key() -> Optional[str]:
     return st.secrets.get("ZHIPU_API_KEY") or os.getenv("ZHIPU_API_KEY")
@@ -154,7 +154,7 @@ ZHIPU_AVAILABLE = get_zhipu_api_key() is not None
 GEMINI_AVAILABLE = GEMINI_SDK_AVAILABLE and get_google_api_key() is not None
 
 # ----------------------------------------------------------------------
-# Concurrency Tracker
+# Concurrency Tracker (unchanged)
 # ----------------------------------------------------------------------
 class ConcurrencyTracker:
     def __init__(self):
@@ -182,7 +182,7 @@ class ConcurrencyTracker:
 concurrency = ConcurrencyTracker()
 
 # ----------------------------------------------------------------------
-# Provider Clients
+# ZhipuClient (unchanged)
 # ----------------------------------------------------------------------
 class ZhipuClient:
     def __init__(self, api_key: str):
@@ -278,6 +278,9 @@ class ZhipuClient:
         client = ZhipuAiClient(api_key=self.api_key)
         return client.videos.retrieve_videos_result(task_id)
 
+# ----------------------------------------------------------------------
+# GeminiClient – UPDATED with google-genai and dynamic selection
+# ----------------------------------------------------------------------
 class GeminiClient:
     def __init__(self, api_key: str):
         self.client = genai.Client(api_key=api_key)
@@ -348,8 +351,117 @@ class GeminiClient:
 # ----------------------------------------------------------------------
 if ZAI_AVAILABLE and ZHIPU_AVAILABLE:
     class ZhipuTaskQueue:
-        # ... (same as before)
-        pass
+        def __init__(self, db_path: str = "yukti_tasks.db"):
+            self.db_path = db_path
+            self.conn = sqlite3.connect(db_path, check_same_thread=False)
+            self._init_db()
+            self.lock = threading.Lock()
+            self.zhipu_map: Dict[str, str] = {}
+            self._start_poller()
+
+        def _init_db(self):
+            self.conn.execute("""
+                CREATE TABLE IF NOT EXISTS tasks (
+                    task_id TEXT PRIMARY KEY,
+                    variant TEXT,
+                    model TEXT,
+                    status TEXT,
+                    progress INTEGER,
+                    result_url TEXT,
+                    error TEXT,
+                    created_at TIMESTAMP,
+                    completed_at TIMESTAMP
+                )
+            """)
+            self.conn.commit()
+
+        def add_task(self, task_id: str, variant: str, model: str):
+            with self.lock:
+                self.conn.execute(
+                    "INSERT INTO tasks VALUES (?,?,?,?,?,?,?,?,?)",
+                    (task_id, variant, model, "submitted", 0, "", "", datetime.now(), None)
+                )
+                self.conn.commit()
+
+        def update_task(self, task_id: str, **kwargs):
+            with self.lock:
+                fields = ", ".join([f"{k}=?" for k in kwargs])
+                values = list(kwargs.values()) + [task_id]
+                self.conn.execute(f"UPDATE tasks SET {fields} WHERE task_id=?", values)
+                self.conn.commit()
+
+        def get_task(self, task_id: str) -> Optional[Dict[str, Any]]:
+            cursor = self.conn.execute("SELECT * FROM tasks WHERE task_id=?", (task_id,))
+            row = cursor.fetchone()
+            if not row:
+                return None
+            return {
+                "task_id": row[0],
+                "variant": row[1],
+                "model": row[2],
+                "status": row[3],
+                "progress": row[4],
+                "result_url": row[5],
+                "error": row[6],
+                "created_at": row[7],
+                "completed_at": row[8],
+            }
+
+        def get_active_tasks(self) -> List[Tuple[str, str, str, int]]:
+            cursor = self.conn.execute(
+                "SELECT task_id, variant, status, progress FROM tasks WHERE status IN ('submitted','pending','processing') ORDER BY created_at"
+            )
+            return cursor.fetchall()
+
+        def submit_async(self, variant: str, model: str, prompt: str, **kwargs) -> str:
+            local_id = f"{variant}_{int(time.time())}_{abs(hash(prompt)) % 10000}"
+            self.add_task(local_id, variant, model)
+            try:
+                api_key = get_zhipu_api_key()
+                if not api_key:
+                    raise RuntimeError("Zhipu API key not configured.")
+                client = ZhipuClient(api_key)
+                zhipu_task_id = client.video_submit(model, prompt, **kwargs)
+                with self.lock:
+                    self.zhipu_map[local_id] = zhipu_task_id
+                self.update_task(local_id, status="pending")
+            except Exception as e:
+                logger.exception("Failed to submit async task")
+                self.update_task(local_id, status="failed", error=str(e))
+            return local_id
+
+        def _poll_tasks(self):
+            while True:
+                tasks = []
+                with self.lock:
+                    tasks = list(self.zhipu_map.items())
+                for local_id, zhipu_id in tasks:
+                    try:
+                        api_key = get_zhipu_api_key()
+                        client = ZhipuClient(api_key)
+                        status_data = client.video_poll(zhipu_id)
+                        if hasattr(status_data, 'status') and status_data.status == "succeeded":
+                            result_url = status_data.video_url
+                            self.update_task(local_id, status="completed", progress=100,
+                                             result_url=result_url)
+                            with self.lock:
+                                del self.zhipu_map[local_id]
+                        elif hasattr(status_data, 'status') and status_data.status == "failed":
+                            error = status_data.error if hasattr(status_data, 'error') else "Unknown error"
+                            self.update_task(local_id, status="failed", error=error)
+                            with self.lock:
+                                del self.zhipu_map[local_id]
+                        elif hasattr(status_data, 'status') and status_data.status == "processing":
+                            progress = getattr(status_data, 'progress', 50)
+                            self.update_task(local_id, status="processing", progress=progress)
+                    except Exception as e:
+                        logger.error(f"Polling task {local_id} failed: {e}")
+                time.sleep(5)
+
+        def _start_poller(self):
+            thread = threading.Thread(target=self._poll_tasks, daemon=True)
+            thread.start()
+
     _task_queue = ZhipuTaskQueue(db_path=str(Path(__file__).parent.parent / "yukti_tasks.db"))
 else:
     class _DummyQueue:
@@ -368,7 +480,7 @@ def get_task_status(task_id: str) -> Optional[Dict[str, Any]]:
     return _task_queue.get_task(task_id)
 
 # ----------------------------------------------------------------------
-# Build MODELS for main.py
+# Build MODELS for main.py (unchanged)
 # ----------------------------------------------------------------------
 MODELS = {}
 for service, models in SERVICES.items():
@@ -382,7 +494,7 @@ for service, models in SERVICES.items():
     }
 
 # ----------------------------------------------------------------------
-# YuktiModel
+# YuktiModel (unchanged, except Gemini call uses new client)
 # ----------------------------------------------------------------------
 class YuktiModel:
     def __init__(self, service: str):

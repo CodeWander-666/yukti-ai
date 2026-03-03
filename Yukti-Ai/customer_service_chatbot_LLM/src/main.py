@@ -921,11 +921,11 @@ if st.session_state.admin_mode:
                 'audio_created': 'Audio'
             }
             display_df = display_df.rename(columns={k: v for k, v in rename_map.items() if k in display_df.columns})
-            st.dataframe(display_df, use_container_width=True)
+            st.dataframe(display_df, width='stretch')
 
             if st.session_state.debug_mode:
                 with st.expander("🔍 Raw User Data (Debug)"):
-                    st.dataframe(users_df)
+                    st.dataframe(users_df, width='stretch')
 
             st.markdown("### ✏️ Edit / Delete Users")
             for _, row in users_df.iterrows():
@@ -980,7 +980,7 @@ if st.session_state.admin_mode:
         else:
             fig1 = px.line(perf, x="day", y="avg_response", color="model_key",
                            title="Average Response Time (ms) per Model")
-            st.plotly_chart(fig1, use_container_width=True)
+            st.plotly_chart(fig1, use_container_width=True)  # plotly uses use_container_width, not width
             perf['error_rate'] = perf['errors'] / perf['requests'] * 100
             fig2 = px.line(perf, x="day", y="error_rate", color="model_key",
                            title="Error Rate (%) per Model")
@@ -1124,7 +1124,7 @@ if st.session_state.admin_mode:
         if hist.empty:
             st.info("📋 No task history yet.")
         else:
-            st.dataframe(hist, use_container_width=True)
+            st.dataframe(hist, width='stretch')
 
     # ----- Insights Tab -----
     with tabs[5]:

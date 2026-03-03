@@ -41,11 +41,11 @@ st.set_page_config(
 )
 
 # ----------------------------------------------------------------------
-# Cyberpunk CSS (unchanged, plus styles for new fixed bar)
+# Cyberpunk CSS (with added recording effect)
 # ----------------------------------------------------------------------
 st.markdown("""
 <style>
-    /* Global cyberpunk theme (kept as is) */
+    /* Global cyberpunk theme (unchanged) */
     .stApp {
         background: linear-gradient(135deg, #0d0b1a 0%, #1a1a2f 100%);
         color: #e0e0ff;
@@ -72,7 +72,6 @@ st.markdown("""
         border-right: 1px solid #ff00ff;
         box-shadow: -5px 0 20px rgba(255,0,255,0.3);
     }
-    /* 3D buttons */
     .stButton > button, .custom-3d-button {
         background: linear-gradient(145deg, #1e1e3f, #2a2a5a);
         border: none;
@@ -98,7 +97,6 @@ st.markdown("""
         transform: translateY(4px);
         box-shadow: 0 2px 0 #0b0b1a, 0 8px 15px rgba(255,0,255,0.4);
     }
-    /* File uploader */
     .stFileUploader {
         background: rgba(30,30,60,0.5);
         border-radius: 15px;
@@ -247,6 +245,17 @@ st.markdown("""
     .small-3d-button:active {
         transform: translateY(2px);
         box-shadow: 0 1px 0 #0b0b1a, 0 3px 8px rgba(255,0,255,0.4);
+    }
+    /* Recording effect */
+    .small-3d-button.recording {
+        background: linear-gradient(145deg, #ff3333, #ff6666);
+        box-shadow: 0 0 15px #ff0000;
+        animation: pulse-red 1s infinite;
+    }
+    @keyframes pulse-red {
+        0% { box-shadow: 0 0 10px #ff0000; }
+        50% { box-shadow: 0 0 20px #ff0000; }
+        100% { box-shadow: 0 0 10px #ff0000; }
     }
     .send-button {
         background: linear-gradient(145deg, #ff00ff, #ff66ff);
@@ -493,10 +502,13 @@ def render_task(task_id):
                                        file_name=f"yukti_image_{task_id[:8]}.png")
 
 # ----------------------------------------------------------------------
-# JavaScript for voice, file, and auto‑scroll
+# JavaScript for voice (with red effect) and file upload
 # ----------------------------------------------------------------------
 st.markdown("""
 <script>
+let recognition = null;
+let isRecording = false;
+
 function waitForStreamlit() {
     if (window.parent.document.querySelector('input[data-testid="stTextInput"]')) {
         initializeFeatures();
@@ -506,6 +518,7 @@ function waitForStreamlit() {
 }
 
 function initializeFeatures() {
+    // File input
     let fileInput = document.getElementById('hidden-file-input');
     if (!fileInput) {
         fileInput = document.createElement('input');
@@ -531,35 +544,83 @@ function initializeFeatures() {
         }
     });
 
-    window.startVoiceRecognition = function() {
+    window.triggerFileUpload = function() {
+        document.getElementById('hidden-file-input').click();
+    };
+
+    // Voice recognition with red effect
+    window.toggleVoiceRecording = function() {
         if (!('webkitSpeechRecognition' in window) && !('SpeechRecognition' in window)) {
             alert('Voice recognition not supported in this browser. Please use Chrome or Edge.');
             return;
         }
-        const recognition = new (window.SpeechRecognition || window.webkitSpeechRecognition)();
-        recognition.lang = 'en-US';
-        recognition.interimResults = false;
-        recognition.maxAlternatives = 1;
-
-        recognition.start();
-
-        recognition.onresult = function(event) {
-            const transcript = event.results[0][0].transcript;
-            const textInput = window.parent.document.querySelector('input[data-testid="stTextInput"][key="message_input"]');
-            if (textInput) {
-                textInput.value = transcript;
-                textInput.dispatchEvent(new Event('input', { bubbles: true }));
+        if (isRecording) {
+            // Stop recording
+            if (recognition) {
+                recognition.stop();
             }
-        };
+            isRecording = false;
+            document.getElementById('voice-button').classList.remove('recording');
+        } else {
+            // Start recording
+            const SpeechRecognition = window.SpeechRecognition || window.webkitSpeechRecognition;
+            recognition = new SpeechRecognition();
+            recognition.lang = 'en-US';
+            recognition.interimResults = false;
+            recognition.maxAlternatives = 1;
 
-        recognition.onerror = function(event) {
-            alert('Voice error: ' + event.error);
-        };
+            recognition.onstart = function() {
+                isRecording = true;
+                document.getElementById('voice-button').classList.add('recording');
+            };
+
+            recognition.onresult = function(event) {
+                const transcript = event.results[0][0].transcript;
+                const textInput = window.parent.document.querySelector('input[data-testid="stTextInput"][key="message_input"]');
+                if (textInput) {
+                    textInput.value = transcript;
+                    textInput.dispatchEvent(new Event('input', { bubbles: true }));
+                }
+            };
+
+            recognition.onerror = function(event) {
+                alert('Voice error: ' + event.error);
+                isRecording = false;
+                document.getElementById('voice-button').classList.remove('recording');
+            };
+
+            recognition.onend = function() {
+                isRecording = false;
+                document.getElementById('voice-button').classList.remove('recording');
+            };
+
+            recognition.start();
+        }
     };
 
-    window.triggerFileUpload = function() {
-        document.getElementById('hidden-file-input').click();
-    };
+    // Attach listeners to buttons
+    const voiceBtn = document.getElementById('voice-button');
+    if (voiceBtn) {
+        voiceBtn.addEventListener('click', window.toggleVoiceRecording);
+    }
+    const fileBtn = document.getElementById('file-button');
+    if (fileBtn) {
+        fileBtn.addEventListener('click', window.triggerFileUpload);
+    }
+
+    // Enter key to send
+    const textInput = window.parent.document.querySelector('input[data-testid="stTextInput"][key="message_input"]');
+    if (textInput) {
+        textInput.addEventListener('keypress', function(e) {
+            if (e.key === 'Enter' && !e.shiftKey) {
+                e.preventDefault();
+                const sendBtn = window.parent.document.querySelector('button[data-testid="baseButton-secondary"]');
+                if (sendBtn && !sendBtn.disabled) {
+                    sendBtn.click();
+                }
+            }
+        });
+    }
 }
 
 // Auto‑scroll
@@ -692,7 +753,7 @@ for msg in st.session_state.messages:
                     st.video(media["url"])
 
 # ----------------------------------------------------------------------
-# Custom fixed bottom bar (replaces st.chat_input)
+# Custom fixed bottom bar (with voice and file buttons)
 # ----------------------------------------------------------------------
 with st.container():
     st.markdown('<div class="fixed-bottom-bar">', unsafe_allow_html=True)
@@ -700,7 +761,6 @@ with st.container():
     # First row: text input + send button
     col1, col2 = st.columns([8, 1])
     with col1:
-        # Handle input clearing
         if st.session_state.clear_input:
             default_value = ""
             st.session_state.clear_input = False
@@ -739,7 +799,6 @@ if send_clicked and message_input and not st.session_state.processing:
     st.session_state.clear_input = True
     current_prompt = message_input
 
-    # Get uploaded file if any (from the file button)
     uploaded_file_obj = None
     if st.session_state.uploaded_file:
         file_name, file_bytes = st.session_state.uploaded_file

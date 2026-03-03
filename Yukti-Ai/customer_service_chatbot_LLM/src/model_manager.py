@@ -458,17 +458,38 @@ except ImportError:
 
 # Ensure tasks table has user_id column (migration)
 def _ensure_tasks_schema():
+    """Create tasks table with user_id column if not exists; add column if table exists but missing."""
     conn = sqlite3.connect(str(DB_PATH))
     c = conn.cursor()
-    # Check if user_id column exists
-    c.execute("PRAGMA table_info(tasks)")
-    columns = [col[1] for col in c.fetchall()]
-    if 'user_id' not in columns:
-        logger.info("Adding user_id column to tasks table...")
-        c.execute("ALTER TABLE tasks ADD COLUMN user_id INTEGER")
-        c.execute("CREATE INDEX IF NOT EXISTS idx_tasks_user_id ON tasks(user_id)")
+    # Check if tasks table exists
+    c.execute("SELECT name FROM sqlite_master WHERE type='table' AND name='tasks'")
+    if not c.fetchone():
+        logger.info("Creating tasks table...")
+        c.execute('''CREATE TABLE tasks (
+            task_id TEXT PRIMARY KEY,
+            variant TEXT,
+            model TEXT,
+            status TEXT,
+            progress INTEGER,
+            result_url TEXT,
+            error TEXT,
+            created_at TIMESTAMP,
+            completed_at TIMESTAMP,
+            user_id INTEGER
+        )''')
+        c.execute("CREATE INDEX idx_tasks_user_id ON tasks(user_id)")
         conn.commit()
-        logger.info("tasks table updated with user_id.")
+        logger.info("tasks table created with user_id.")
+    else:
+        # Table exists, check for user_id column
+        c.execute("PRAGMA table_info(tasks)")
+        columns = [col[1] for col in c.fetchall()]
+        if 'user_id' not in columns:
+            logger.info("Adding user_id column to tasks table...")
+            c.execute("ALTER TABLE tasks ADD COLUMN user_id INTEGER")
+            c.execute("CREATE INDEX IF NOT EXISTS idx_tasks_user_id ON tasks(user_id)")
+            conn.commit()
+            logger.info("tasks table updated with user_id.")
     conn.close()
 
 _ensure_tasks_schema()

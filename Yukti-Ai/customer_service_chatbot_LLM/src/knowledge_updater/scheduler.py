@@ -1,6 +1,5 @@
 """
-Scheduler entry point for knowledge updater.
-Calls rebuild_index and logs result.
+Scheduler entry point – can be called by cron or manually.
 """
 
 import logging
@@ -8,22 +7,14 @@ from .builder import rebuild_index
 
 logger = logging.getLogger(__name__)
 
-def run_once(source: str = None, dry_run: bool = False):
+def run_once(source: str = None, dry_run: bool = False) -> bool:
     """
-    Single execution of the knowledge base update.
-    Args:
-        source: if provided, only update that source (by name) – not yet implemented
-        dry_run: if True, fetch but do not build index (not yet implemented)
+    Run the updater once.
+    If source is specified, only that source? (Not implemented; we always rebuild all.)
     """
-    logger.info("Knowledge updater started.")
+    logger.info("Running knowledge updater...")
     if dry_run:
-        logger.info("Dry run mode – will not save index.")
-    if source:
-        logger.info(f"Filtering for source: {source} (not implemented, will fetch all)")
-
+        logger.info("Dry run – would rebuild index.")
+        return True
     success = rebuild_index()
-    if success:
-        logger.info("Knowledge base updated successfully.")
-    else:
-        logger.error("Knowledge base update failed.")
     return success

@@ -1,6 +1,9 @@
 """
-Original WhatsApp‑style chat interface (restored) with database persistence,
-visible sidebar toggle, and detailed knowledge base error reporting.
+Original WhatsApp‑style chat interface (restored) with all fixes:
+- Input clearing via flag (no widget modification error)
+- get_active_tasks imported
+- Robust JavaScript for voice/file
+- Detailed KB diagnostics
 """
 
 import os
@@ -44,6 +47,7 @@ try:
         get_available_models,
         MODELS,
         get_task_status,
+        get_active_tasks,   # <-- FIX: added missing import
         ZHIPU_AVAILABLE,
         load_model,
     )
@@ -58,7 +62,7 @@ except ImportError as e:
     def detect_language(text):
         return {"language": "en", "method": "fallback", "explicit_instruction": None}
 
-# Import database for chat persistence (if available)
+# Optional database persistence
 try:
     from database import save_message, load_messages
     DATABASE_AVAILABLE = True
@@ -83,22 +87,18 @@ st.set_page_config(
 )
 
 # ----------------------------------------------------------------------
-# WhatsApp‑style CSS (header is NOT hidden – sidebar toggle visible)
+# WhatsApp‑style CSS (header visible for sidebar toggle)
 # ----------------------------------------------------------------------
 st.markdown("""
 <style>
     .stApp {
         background: #0b141a;
     }
-    /* Keep the Streamlit header visible for sidebar toggle */
-    /* Only hide the default menu and footer */
     #MainMenu {visibility: hidden;}
     footer {visibility: hidden;}
-    /* Main content area – make room for fixed input bar */
     .main > div {
         padding-bottom: 80px !important;
     }
-    /* Chat message container */
     .stChatMessage {
         padding: 0.5rem 1rem;
         margin-bottom: 0.5rem;
@@ -108,7 +108,6 @@ st.markdown("""
         box-shadow: 0 1px 2px rgba(0,0,0,0.1);
         position: relative;
     }
-    /* User message (right side) */
     .stChatMessage[data-testid="user-message"] {
         background: #005c4b;
         color: white;
@@ -116,21 +115,18 @@ st.markdown("""
         margin-left: auto;
         border-bottom-right-radius: 4px;
     }
-    /* Assistant message (left side) */
     .stChatMessage[data-testid="assistant-message"] {
         background: #202c33;
         color: #e9edef;
         align-self: flex-start;
         border-bottom-left-radius: 4px;
     }
-    /* Timestamp */
     .message-timestamp {
         font-size: 0.7rem;
         color: rgba(255,255,255,0.6);
         margin-top: 0.2rem;
         text-align: right;
     }
-    /* Chat input bar container – fixed at bottom */
     .chat-input-container {
         position: fixed;
         bottom: 0;
@@ -143,14 +139,13 @@ st.markdown("""
         align-items: center;
         gap: 10px;
         z-index: 100;
-        margin-left: 21rem; /* sidebar width */
+        margin-left: 21rem;
     }
     @media (max-width: 992px) {
         .chat-input-container {
             margin-left: 0;
         }
     }
-    /* 3D buttons */
     .chat-bar-button {
         background: #2a3942;
         border: none;
@@ -176,7 +171,6 @@ st.markdown("""
     .chat-bar-button:active {
         transform: scale(0.95);
     }
-    /* Text input */
     .stTextInput > div > input {
         background: #2a3942;
         border: none;
@@ -190,20 +184,16 @@ st.markdown("""
         outline: none;
         box-shadow: 0 0 0 2px #00a884;
     }
-    /* Hide Streamlit input label */
     .stTextInput > label {
         display: none;
     }
-    /* Video container */
     .stVideo {
         margin: 0.5rem 0;
     }
-    /* Sidebar styling */
     .css-1d391kg {
         background: #1f2c33;
         border-right: 1px solid #2a3942;
     }
-    /* Hide default chat input (we use custom) */
     .stChatInput {
         display: none !important;
     }
@@ -232,7 +222,6 @@ st.markdown("""
 # Session state initialization
 # ----------------------------------------------------------------------
 if "messages" not in st.session_state:
-    # Load from database if available
     if DATABASE_AVAILABLE:
         st.session_state.messages = load_messages()
         if not st.session_state.messages:
@@ -256,12 +245,12 @@ if "conversation_language" not in st.session_state:
 if "uploaded_file" not in st.session_state:
     st.session_state.uploaded_file = None
 
-# NEW: flag to clear input on next run
+# Flag to clear input on next run (FIX)
 if "clear_input" not in st.session_state:
     st.session_state.clear_input = False
 
 # ----------------------------------------------------------------------
-# JavaScript for voice and file input (unchanged, working)
+# JavaScript for voice and file input (robust, waits for DOM)
 # ----------------------------------------------------------------------
 st.markdown("""
 <script>
@@ -351,7 +340,7 @@ if file_receiver and not st.session_state.uploaded_file:
         st.session_state.uploaded_file = None
 
 # ----------------------------------------------------------------------
-# Sidebar (with knowledge base diagnostics and task list)
+# Sidebar
 # ----------------------------------------------------------------------
 with st.sidebar:
     st.markdown("## 🧠 Model")
@@ -381,9 +370,7 @@ with st.sidebar:
 
     st.divider()
 
-    # ------------------------------------------------------------------
-    # Knowledge Base section with detailed error reporting
-    # ------------------------------------------------------------------
+    # Knowledge Base section with detailed diagnostics
     st.markdown("### 📚 Knowledge Base")
     kb_status = st.session_state.kb_status
 
@@ -394,7 +381,6 @@ with st.sidebar:
         if kb_status["error"]:
             st.error(f"Error: {kb_status['error']}")
         else:
-            # Show detailed diagnostics
             if not kb_status["dataset_exists"]:
                 st.error("Dataset file not found at dataset/dataset.csv")
             elif not kb_status["dataset_readable"]:
@@ -422,7 +408,7 @@ with st.sidebar:
         if st.button("⟳ Refresh Tasks", use_container_width=True):
             st.rerun()
         try:
-            active_tasks = get_active_tasks()
+            active_tasks = get_active_tasks()   # <-- now works because imported
             for task_id, variant, status, progress in active_tasks:
                 if task_id not in st.session_state.tasks:
                     st.session_state.tasks[task_id] = {
@@ -471,13 +457,12 @@ with cols[0]:
 with cols[1]:
     st.markdown('<button class="chat-bar-button" onclick="window.triggerFileUpload()">📎</button>', unsafe_allow_html=True)
 with cols[2]:
-    # Handle input clearing correctly
+    # Handle input clearing correctly (FIX)
     if st.session_state.clear_input:
         default_value = ""
         st.session_state.clear_input = False
     else:
         default_value = None
-
     prompt = st.text_input("Message", key="message_input", value=default_value, label_visibility="collapsed", placeholder="Type a message")
 
 # ----------------------------------------------------------------------
@@ -502,7 +487,7 @@ for msg in st.session_state.messages:
 # ----------------------------------------------------------------------
 if prompt and prompt.strip():
     current_prompt = prompt
-    # Set flag to clear input on next run (instead of modifying widget directly)
+    # Set flag to clear input on next run (FIX)
     st.session_state.clear_input = True
 
     uploaded_file_obj = None
@@ -634,7 +619,6 @@ if prompt and prompt.strip():
             logger.exception("Fatal error in message processing")
             full_response = ""
 
-    # Append assistant message
     if result and result.get("type") == "sync" and full_response:
         st.session_state.messages.append({
             "role": "assistant",

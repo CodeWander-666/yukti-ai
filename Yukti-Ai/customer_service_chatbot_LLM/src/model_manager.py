@@ -1,11 +1,14 @@
 """
 Core model orchestration – manages Zhipu (sync/async) and Gemini models
 with concurrency control, priority‑based fallback, and language integration.
+Includes comprehensive error handling and fallbacks for missing dependencies.
 """
 
-import logging
 import os
+import sys
 import time
+import json
+import logging
 import threading
 import sqlite3
 import requests
@@ -14,10 +17,26 @@ import base64
 import re
 from datetime import datetime
 from pathlib import Path
-from typing import Dict, Any, Optional, List, Tuple
+from typing import Dict, Any, Optional, List, Tuple, Union
 
-import streamlit as st
-from langchain_openai import ChatOpenAI
+# Optional imports – handle gracefully if missing
+try:
+    import streamlit as st
+    STREAMLIT_AVAILABLE = True
+except ImportError:
+    STREAMLIT_AVAILABLE = False
+    # Define a dummy secrets object for non‑Streamlit environments
+    class DummySecrets:
+        def get(self, key, default=None):
+            return os.getenv(key, default)
+    st = type('st', (), {'secrets': DummySecrets()})()
+
+try:
+    from langchain_openai import ChatOpenAI
+    LANGCHAIN_OPENAI_AVAILABLE = True
+except ImportError:
+    LANGCHAIN_OPENAI_AVAILABLE = False
+    ChatOpenAI = None
 
 try:
     from zai import ZhipuAiClient
@@ -34,16 +53,23 @@ except ImportError:
     GEMINI_SDK_AVAILABLE = False
     logging.warning("google-genai not installed; Gemini models disabled.")
 
-# Import language utilities (new shared module)
-from language_utils import get_language_name
+# Import language utilities (must be present)
+try:
+    from language_utils import get_language_name
+except ImportError:
+    # Fallback if language_utils not yet created
+    def get_language_name(code: str) -> str:
+        names = {'hi': 'Hindi', 'en': 'English', 'hinglish': 'Hinglish'}
+        return names.get(code, code)
 
 logger = logging.getLogger(__name__)
 
+# ----------------------------------------------------------------------
+# Constants and Configuration
+# ----------------------------------------------------------------------
 ZHIPU_BASE_URL = "https://open.bigmodel.cn/api/paas/v4"
 
-# ----------------------------------------------------------------------
-# Model Registry
-# ----------------------------------------------------------------------
+# Model Registry – each model has provider, type, concurrency limit, description
 _MODEL_REGISTRY = {
     "glm-4-flash": {
         "model_id": "glm-4-flash",
@@ -110,6 +136,7 @@ _MODEL_REGISTRY = {
     }
 }
 
+# Service definitions – priority lists of model keys
 SERVICES = {
     "Yukti‑Flash": ["glm-4-flash", "glm-4-plus"],
     "Yukti‑Quantum": ["glm-5", "glm-4-plus"],
@@ -120,13 +147,25 @@ SERVICES = {
 }
 
 # ----------------------------------------------------------------------
-# API Key Helpers
+# API Key Helpers (safe for both Streamlit and cron)
 # ----------------------------------------------------------------------
 def get_zhipu_api_key() -> Optional[str]:
-    return st.secrets.get("ZHIPU_API_KEY") or os.getenv("ZHIPU_API_KEY")
+    """Retrieve Zhipu API key from secrets or environment."""
+    key = None
+    if STREAMLIT_AVAILABLE:
+        key = st.secrets.get("ZHIPU_API_KEY")
+    if not key:
+        key = os.getenv("ZHIPU_API_KEY")
+    return key
 
 def get_google_api_key() -> Optional[str]:
-    return st.secrets.get("GOOGLE_API_KEY") or os.getenv("GOOGLE_API_KEY")
+    """Retrieve Google API key from secrets or environment."""
+    key = None
+    if STREAMLIT_AVAILABLE:
+        key = st.secrets.get("GOOGLE_API_KEY")
+    if not key:
+        key = os.getenv("GOOGLE_API_KEY")
+    return key
 
 ZHIPU_AVAILABLE = get_zhipu_api_key() is not None
 GEMINI_AVAILABLE = GEMINI_SDK_AVAILABLE and get_google_api_key() is not None
@@ -135,6 +174,7 @@ GEMINI_AVAILABLE = GEMINI_SDK_AVAILABLE and get_google_api_key() is not None
 # Concurrency Tracker (for sync models)
 # ----------------------------------------------------------------------
 class ConcurrencyTracker:
+    """Thread‑safe counter for active requests per model."""
     def __init__(self):
         self.counters = {}
         self.lock = threading.Lock()
@@ -160,10 +200,12 @@ class ConcurrencyTracker:
 concurrency = ConcurrencyTracker()
 
 # ----------------------------------------------------------------------
-# Zhipu Client
+# Zhipu Client (with robust error handling)
 # ----------------------------------------------------------------------
 class ZhipuClient:
     def __init__(self, api_key: str):
+        if not api_key:
+            raise ValueError("Zhipu API key is required.")
         self.api_key = api_key
         self.session = requests.Session()
         self.session.headers.update({
@@ -172,6 +214,7 @@ class ZhipuClient:
         })
 
     def _request_with_retry(self, method: str, url: str, **kwargs) -> requests.Response:
+        """Make HTTP request with exponential backoff and retry."""
         max_retries = 3
         for attempt in range(max_retries):
             try:
@@ -184,18 +227,25 @@ class ZhipuClient:
                 resp.raise_for_status()
                 return resp
             except requests.exceptions.RequestException as e:
+                logger.warning(f"Request failed (attempt {attempt+1}): {e}")
                 if attempt == max_retries - 1:
                     raise
-                logger.warning(f"Request failed (attempt {attempt+1}): {e}, retrying...")
                 time.sleep(2 ** attempt)
         raise RuntimeError("Max retries exceeded")
 
     def text(self, model: str, prompt: str, temperature: float = 0.1, language: str = None) -> str:
         """Generate text with optional language hint."""
+        if not LANGCHAIN_OPENAI_AVAILABLE or ChatOpenAI is None:
+            raise RuntimeError("langchain-openai not installed. Cannot generate text.")
+
+        # Determine target language
         if language is None:
-            from language_detector import detect_language
-            lang_info = detect_language(prompt)
-            target_lang = lang_info['language']
+            try:
+                from language_detector import detect_language
+                lang_info = detect_language(prompt)
+                target_lang = lang_info['language']
+            except ImportError:
+                target_lang = 'en'
         else:
             target_lang = language
 
@@ -208,33 +258,43 @@ class ZhipuClient:
         else:
             enhanced_prompt = prompt
 
-        llm = ChatOpenAI(
-            model=model,
-            api_key=self.api_key,
-            base_url=ZHIPU_BASE_URL,
-            temperature=temperature,
-            max_retries=2,
-        )
-        response = llm.invoke(enhanced_prompt)
-        content = response.content if hasattr(response, 'content') else str(response)
-        if not content:
-            logger.warning("Empty response, retrying with higher temperature")
-            llm.temperature = 0.7
-            response2 = llm.invoke(enhanced_prompt)
-            content2 = response2.content if hasattr(response2, 'content') else str(response2)
-            if content2:
-                return content2
-            return "(Empty response from model)"
-        return content
+        try:
+            llm = ChatOpenAI(
+                model=model,
+                api_key=self.api_key,
+                base_url=ZHIPU_BASE_URL,
+                temperature=temperature,
+                max_retries=2,
+            )
+            response = llm.invoke(enhanced_prompt)
+            content = response.content if hasattr(response, 'content') else str(response)
+            if not content:
+                logger.warning("Empty response, retrying with higher temperature")
+                llm.temperature = 0.7
+                response2 = llm.invoke(enhanced_prompt)
+                content2 = response2.content if hasattr(response2, 'content') else str(response2)
+                if content2:
+                    return content2
+                return "(Empty response from model)"
+            return content
+        except Exception as e:
+            logger.exception("Text generation failed")
+            raise RuntimeError(f"Text generation error: {e}")
 
     def image(self, model: str, prompt: str) -> str:
+        """Generate image and return URL."""
         url = f"{ZHIPU_BASE_URL}/images/generations"
         payload = {"model": model, "prompt": prompt}
-        resp = self._request_with_retry("POST", url, json=payload)
-        return resp.json()["data"][0]["url"]
+        try:
+            resp = self._request_with_retry("POST", url, json=payload)
+            data = resp.json()
+            return data["data"][0]["url"]
+        except Exception as e:
+            logger.exception("Image generation failed")
+            raise RuntimeError(f"Image generation error: {e}")
 
     def audio(self, model: str, prompt: str, voice: str = None, language: str = None) -> str:
-        """Generate audio with optional language hint."""
+        """Generate audio and return path to WAV file."""
         if language and language != 'en':
             lang_name = get_language_name(language)
             prompt = f"[Generate audio with speech in {lang_name}]\n{prompt}"
@@ -242,52 +302,69 @@ class ZhipuClient:
         url = f"{ZHIPU_BASE_URL}/chat/completions"
         messages = [{"role": "user", "content": [{"type": "text", "text": prompt}]}]
         payload = {"model": model, "messages": messages, "temperature": 0.1, "stream": False}
-        resp = self._request_with_retry("POST", url, json=payload)
-        data = resp.json()
         try:
-            audio_b64 = data["choices"][0]["message"]["audio"]["data"]
-        except (KeyError, IndexError, TypeError) as e:
-            logger.error(f"Unexpected audio response: {data}")
-            raise RuntimeError("Audio generation failed: unexpected response format") from e
-        audio_bytes = base64.b64decode(audio_b64)
-        fd, path = tempfile.mkstemp(suffix=".wav", prefix="yukti_audio_")
-        with os.fdopen(fd, "wb") as f:
-            f.write(audio_bytes)
-        return path
+            resp = self._request_with_retry("POST", url, json=payload)
+            data = resp.json()
+            try:
+                audio_b64 = data["choices"][0]["message"]["audio"]["data"]
+            except (KeyError, IndexError, TypeError) as e:
+                logger.error(f"Unexpected audio response: {data}")
+                raise RuntimeError("Audio generation failed: unexpected response format") from e
+            audio_bytes = base64.b64decode(audio_b64)
+            fd, path = tempfile.mkstemp(suffix=".wav", prefix="yukti_audio_")
+            with os.fdopen(fd, "wb") as f:
+                f.write(audio_bytes)
+            return path
+        except Exception as e:
+            logger.exception("Audio generation failed")
+            raise RuntimeError(f"Audio generation error: {e}")
 
     def video_submit(self, model: str, prompt: str, language: str = None, **kwargs) -> str:
-        """Submit a video generation task with optional language instruction."""
+        """Submit a video generation task and return task ID."""
         if not ZAI_AVAILABLE:
             raise RuntimeError("Video generation requires zai-sdk.")
         if language and language != 'en':
             lang_name = get_language_name(language)
             prompt = f"[Generate video with narration in {lang_name}]\n{prompt}"
 
-        from zai import ZhipuAiClient
-        client = ZhipuAiClient(api_key=self.api_key)
-        args = {
-            "model": model,
-            "prompt": prompt,
-            "quality": kwargs.get("quality", "quality"),
-            "with_audio": kwargs.get("with_audio", True),
-            "size": kwargs.get("size", "1920x1080"),
-            "fps": kwargs.get("fps", 30),
-        }
-        if "image_url" in kwargs and kwargs["image_url"]:
-            args["image_url"] = kwargs["image_url"]
-        response = client.videos.generations(**args)
-        return response.id
+        try:
+            from zai import ZhipuAiClient
+            client = ZhipuAiClient(api_key=self.api_key)
+            args = {
+                "model": model,
+                "prompt": prompt,
+                "quality": kwargs.get("quality", "quality"),
+                "with_audio": kwargs.get("with_audio", True),
+                "size": kwargs.get("size", "1920x1080"),
+                "fps": kwargs.get("fps", 30),
+            }
+            if "image_url" in kwargs and kwargs["image_url"]:
+                args["image_url"] = kwargs["image_url"]
+            response = client.videos.generations(**args)
+            return response.id
+        except Exception as e:
+            logger.exception("Video submission failed")
+            raise RuntimeError(f"Video submission error: {e}")
 
     def video_poll(self, task_id: str) -> dict:
-        from zai import ZhipuAiClient
-        client = ZhipuAiClient(api_key=self.api_key)
-        return client.videos.retrieve_videos_result(task_id)
+        """Poll video task status."""
+        if not ZAI_AVAILABLE:
+            raise RuntimeError("Video generation requires zai-sdk.")
+        try:
+            from zai import ZhipuAiClient
+            client = ZhipuAiClient(api_key=self.api_key)
+            return client.videos.retrieve_videos_result(task_id)
+        except Exception as e:
+            logger.exception("Video polling failed")
+            raise RuntimeError(f"Video polling error: {e}")
 
 # ----------------------------------------------------------------------
-# Gemini Client (with dynamic model refresh)
+# Gemini Client (with dynamic model refresh and quota handling)
 # ----------------------------------------------------------------------
 class GeminiClient:
     def __init__(self, api_key: str):
+        if not api_key:
+            raise ValueError("Google API key is required.")
         self.client = genai.Client(api_key=api_key)
         self._available_models = None
         self._selected_model = None
@@ -295,6 +372,7 @@ class GeminiClient:
         self._refresh_interval = 3600  # refresh model list every hour
 
     def _refresh_models(self):
+        """Refresh available Gemini models list."""
         now = time.time()
         if self._available_models is None or (now - self._last_refresh) > self._refresh_interval:
             try:
@@ -311,6 +389,7 @@ class GeminiClient:
                     self._available_models = []
 
     def _select_model(self) -> str:
+        """Select best available Gemini model."""
         self._refresh_models()
         preferred = [
             "gemini-2.0-flash-exp",
@@ -334,13 +413,18 @@ class GeminiClient:
         if self._selected_model is None:
             self._selected_model = self._select_model()
 
+        # Determine target language
         if language is None:
-            from language_detector import detect_language
-            lang_info = detect_language(prompt)
-            target_lang = lang_info['language']
+            try:
+                from language_detector import detect_language
+                lang_info = detect_language(prompt)
+                target_lang = lang_info['language']
+            except ImportError:
+                target_lang = 'en'
         else:
             target_lang = language
 
+        # Add system instruction for language if needed
         if target_lang == 'hinglish':
             system_msg = "Respond in Hinglish (mix of Hindi and English)."
         elif target_lang != 'en':
@@ -384,7 +468,7 @@ class GeminiClient:
         raise RuntimeError("Gemini service unavailable after retries")
 
 # ----------------------------------------------------------------------
-# Async Task Queue (with concurrency semaphores)
+# Async Task Queue (with concurrency control and SQLite persistence)
 # ----------------------------------------------------------------------
 # Semaphores for async tasks per model
 _async_semaphores = {}
@@ -408,22 +492,28 @@ if ZAI_AVAILABLE and ZHIPU_AVAILABLE:
             self._start_poller()
 
         def _init_db(self):
-            self.conn.execute("""
-                CREATE TABLE IF NOT EXISTS tasks (
-                    task_id TEXT PRIMARY KEY,
-                    variant TEXT,
-                    model TEXT,
-                    status TEXT,
-                    progress INTEGER,
-                    result_url TEXT,
-                    error TEXT,
-                    created_at TIMESTAMP,
-                    completed_at TIMESTAMP
-                )
-            """)
-            self.conn.commit()
+            """Create tasks table if not exists."""
+            try:
+                self.conn.execute("""
+                    CREATE TABLE IF NOT EXISTS tasks (
+                        task_id TEXT PRIMARY KEY,
+                        variant TEXT,
+                        model TEXT,
+                        status TEXT,
+                        progress INTEGER,
+                        result_url TEXT,
+                        error TEXT,
+                        created_at TIMESTAMP,
+                        completed_at TIMESTAMP
+                    )
+                """)
+                self.conn.commit()
+            except Exception as e:
+                logger.exception("Failed to initialize task database")
+                raise
 
         def add_task(self, task_id: str, variant: str, model: str):
+            """Insert a new task record."""
             with self.lock:
                 self.conn.execute(
                     "INSERT INTO tasks VALUES (?,?,?,?,?,?,?,?,?)",
@@ -432,6 +522,7 @@ if ZAI_AVAILABLE and ZHIPU_AVAILABLE:
                 self.conn.commit()
 
         def update_task(self, task_id: str, **kwargs):
+            """Update task fields."""
             with self.lock:
                 fields = ", ".join([f"{k}=?" for k in kwargs])
                 values = list(kwargs.values()) + [task_id]
@@ -439,6 +530,7 @@ if ZAI_AVAILABLE and ZHIPU_AVAILABLE:
                 self.conn.commit()
 
         def get_task(self, task_id: str) -> Optional[Dict[str, Any]]:
+            """Retrieve a task by ID."""
             cursor = self.conn.execute("SELECT * FROM tasks WHERE task_id=?", (task_id,))
             row = cursor.fetchone()
             if not row:
@@ -456,6 +548,7 @@ if ZAI_AVAILABLE and ZHIPU_AVAILABLE:
             }
 
         def get_active_tasks(self) -> List[Tuple[str, str, str, int]]:
+            """Return list of active (not completed/failed) tasks."""
             cursor = self.conn.execute(
                 "SELECT task_id, variant, status, progress FROM tasks WHERE status IN ('submitted','pending','processing') ORDER BY created_at"
             )
@@ -487,6 +580,7 @@ if ZAI_AVAILABLE and ZHIPU_AVAILABLE:
             return local_id
 
         def _poll_tasks(self):
+            """Background thread that polls all pending tasks."""
             from config import TASK_POLL_INTERVAL
             while True:
                 tasks = []
@@ -531,9 +625,11 @@ else:
     _task_queue = _DummyQueue()
 
 def get_active_tasks() -> List[Tuple[str, str, str, int]]:
+    """Return list of active async tasks."""
     return _task_queue.get_active_tasks()
 
 def get_task_status(task_id: str) -> Optional[Dict[str, Any]]:
+    """Return status of a specific task."""
     return _task_queue.get_task(task_id)
 
 # ----------------------------------------------------------------------
@@ -551,6 +647,7 @@ for service, models in SERVICES.items():
     }
 
 class YuktiModel:
+    """Wrapper for a service that can invoke its models with fallback and concurrency control."""
     def __init__(self, service: str):
         self.service = service
         if service not in SERVICES:
@@ -562,7 +659,8 @@ class YuktiModel:
 
     def invoke(self, prompt: str, **kwargs) -> Any:
         """
-        Passes any extra kwargs (e.g., language) to the underlying model.
+        Invoke the service with fallback over its model list.
+        Extra kwargs (e.g., language) are passed to the underlying model.
         """
         last_error = None
         for model_key in SERVICES[self.service]:
@@ -586,6 +684,8 @@ class YuktiModel:
         raise RuntimeError(f"All models failed for service '{self.service}'. Last error: {last_error}")
 
     def _call_zhipu_model(self, model_key: str, prompt: str, **kwargs) -> Any:
+        if not self.zhipu_api_key:
+            raise RuntimeError("Zhipu API key not configured.")
         client = ZhipuClient(self.zhipu_api_key)
         model_id = _MODEL_REGISTRY[model_key]["model_id"]
         if model_id in ["glm-4-flash", "glm-4-plus", "glm-5"]:
@@ -631,11 +731,13 @@ def get_available_models() -> List[str]:
     return available
 
 def get_service_config(service: str) -> Optional[Dict[str, Any]]:
+    """Return configuration for a service."""
     if service in SERVICES:
         return {"models": SERVICES[service]}
     return None
 
 def get_model_config(service: str) -> Optional[Dict[str, Any]]:
+    """Return configuration for the primary model of a service."""
     if service not in SERVICES:
         return None
     first_model = SERVICES[service][0]

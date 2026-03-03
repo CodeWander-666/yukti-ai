@@ -178,6 +178,19 @@ def init_db():
             FOREIGN KEY(admin_id) REFERENCES users(id)
         )''')
 
+        # Tasks table (for async video)
+        c.execute('''CREATE TABLE IF NOT EXISTS tasks (
+            task_id TEXT PRIMARY KEY,
+            variant TEXT,
+            model TEXT,
+            status TEXT,
+            progress INTEGER,
+            result_url TEXT,
+            error TEXT,
+            created_at TIMESTAMP,
+            completed_at TIMESTAMP
+        )''')
+
         # Indexes
         c.execute("CREATE INDEX IF NOT EXISTS idx_users_username ON users(username)")
         c.execute("CREATE INDEX IF NOT EXISTS idx_users_is_admin ON users(is_admin)")
@@ -332,7 +345,7 @@ def record_kb_metrics():
         logger.error(f"Failed to record KB metrics: {e}")
 
 # ----------------------------------------------------------------------
-# Admin data functions
+# Admin data functions (enhanced)
 # ----------------------------------------------------------------------
 def get_all_users():
     try:
@@ -342,27 +355,61 @@ def get_all_users():
         return df
     except Exception as e:
         logger.exception("Failed to fetch users")
-        return pd.DataFrame()
+        return pd.DataFrame(columns=["id", "username", "is_admin", "created_at"])
 
 def get_user_message_counts():
     try:
         conn = sqlite3.connect(str(DB_PATH))
         query = """
-            SELECT u.username,
-                   COUNT(a.id) as total_messages,
-                   SUM(CASE WHEN a.success = 1 THEN 1 ELSE 0 END) as successful,
-                   SUM(CASE WHEN a.success = 0 THEN 1 ELSE 0 END) as failed,
-                   MAX(a.timestamp) as last_active
-            FROM users u LEFT JOIN user_activity a ON u.id = a.user_id
+            SELECT
+                u.id,
+                u.username,
+                u.is_admin,
+                u.created_at,
+                COUNT(a.id) AS total_messages,
+                SUM(CASE WHEN a.success = 1 THEN 1 ELSE 0 END) AS successful,
+                SUM(CASE WHEN a.success = 0 THEN 1 ELSE 0 END) AS failed,
+                AVG(a.response_time_ms) AS avg_response_time,
+                MAX(a.timestamp) AS last_active,
+                (
+                    SELECT model_key
+                    FROM user_activity a2
+                    WHERE a2.user_id = u.id
+                    GROUP BY a2.model_key
+                    ORDER BY COUNT(*) DESC
+                    LIMIT 1
+                ) AS most_used_model
+            FROM users u
+            LEFT JOIN user_activity a ON u.id = a.user_id
             GROUP BY u.id
             ORDER BY total_messages DESC
         """
         df = pd.read_sql_query(query, conn)
         conn.close()
+
+        if not df.empty:
+            # Add derived columns
+            df['success_rate'] = (df['successful'] / df['total_messages'].replace(0, 1)) * 100
+            df['success_rate'] = df['success_rate'].round(1).astype(str) + '%'
+            df['avg_response_time'] = df['avg_response_time'].round(0).fillna(0).astype(int)
+            df['created_at'] = pd.to_datetime(df['created_at']).dt.strftime('%Y-%m-%d %H:%M')
+            df['last_active'] = pd.to_datetime(df['last_active']).dt.strftime('%Y-%m-%d %H:%M')
+        else:
+            # Return empty DataFrame with all expected columns
+            df = pd.DataFrame(columns=[
+                'id', 'username', 'is_admin', 'created_at', 'total_messages',
+                'successful', 'failed', 'avg_response_time', 'last_active',
+                'most_used_model', 'success_rate'
+            ])
         return df
     except Exception as e:
-        logger.exception("Failed to get user message counts")
-        return pd.DataFrame()
+        logger.exception("get_user_message_counts failed")
+        # Show error in debug mode (handled by caller)
+        return pd.DataFrame(columns=[
+            'id', 'username', 'is_admin', 'created_at', 'total_messages',
+            'successful', 'failed', 'avg_response_time', 'last_active',
+            'most_used_model', 'success_rate'
+        ])
 
 def update_user(user_id, username, password, is_admin):
     try:
@@ -417,7 +464,7 @@ def create_user(username, password, is_admin):
         logger.exception("Create user failed")
         return False, str(e)
 
-def get_model_performance(days=7):
+def get_model_performance(days=30):
     try:
         conn = sqlite3.connect(str(DB_PATH))
         query = f"""
@@ -435,7 +482,7 @@ def get_model_performance(days=7):
         return df
     except Exception as e:
         logger.exception("Failed to get model performance")
-        return pd.DataFrame()
+        return pd.DataFrame(columns=["model_key", "day", "requests", "avg_response", "errors"])
 
 def get_user_activity_summary(days=30):
     try:
@@ -454,7 +501,7 @@ def get_user_activity_summary(days=30):
         return df
     except Exception as e:
         logger.exception("Failed to get user activity summary")
-        return pd.DataFrame()
+        return pd.DataFrame(columns=["day", "active_users", "total_queries"])
 
 def get_system_metrics_history(hours=24):
     try:
@@ -470,7 +517,7 @@ def get_system_metrics_history(hours=24):
         return df
     except Exception as e:
         logger.exception("Failed to get system metrics history")
-        return pd.DataFrame()
+        return pd.DataFrame(columns=["time", "cpu", "memory", "disk"])
 
 def get_kb_history(days=30):
     try:
@@ -486,7 +533,7 @@ def get_kb_history(days=30):
         return df
     except Exception as e:
         logger.exception("Failed to get KB history")
-        return pd.DataFrame()
+        return pd.DataFrame(columns=["time", "doc_count", "index_size"])
 
 def get_task_history(limit=100):
     try:
@@ -502,7 +549,7 @@ def get_task_history(limit=100):
         return df
     except Exception as e:
         logger.exception("Failed to get task history")
-        return pd.DataFrame()
+        return pd.DataFrame(columns=["task_id", "variant", "model", "status", "progress", "result_url", "error", "created_at", "completed_at"])
 
 def get_database_stats():
     stats = {}
@@ -534,6 +581,7 @@ if "logged_in" not in st.session_state:
     st.session_state.clear_input = False
     st.session_state.processing = False
     st.session_state.uploaded_file = None
+    st.session_state.last_metrics_record = 0  # for periodic recording
 
 # ----------------------------------------------------------------------
 # Login / Signup UI
@@ -592,6 +640,9 @@ with st.sidebar:
         if admin_mode != st.session_state.admin_mode:
             st.session_state.admin_mode = admin_mode
             st.rerun()
+
+        # Debug mode toggle (only for admins)
+        st.session_state.debug_mode = st.checkbox("🔧 Debug Mode", value=st.session_state.get("debug_mode", False))
 
     st.markdown("## 🧠 Model")
     model_options = get_available_models() or ["Yukti‑Flash"]
@@ -659,8 +710,12 @@ if st.session_state.admin_mode:
     st.title("🛡️ Admin Dashboard")
     st.caption(f"Logged in as {st.session_state.username} (Admin)")
 
-    record_system_metrics()
-    record_kb_metrics()
+    # Record metrics periodically
+    now = time.time()
+    if now - st.session_state.last_metrics_record > 60:  # every minute
+        record_system_metrics()
+        record_kb_metrics()
+        st.session_state.last_metrics_record = now
 
     with st.expander("🔍 Database Diagnostics"):
         stats = get_database_stats()
@@ -702,89 +757,119 @@ if st.session_state.admin_mode:
 
     with tabs[1]:
         st.subheader("User Management")
-        with st.expander("➕ Add User"):
-            with st.form("add_user"):
-                u = st.text_input("Username")
-                p = st.text_input("Password", type="password")
-                pc = st.text_input("Confirm", type="password")
-                admin = st.checkbox("Admin")
-                if st.form_submit_button("Create"):
-                    if p != pc:
+
+        # Add new user form
+        with st.expander("➕ Add New User", expanded=False):
+            with st.form("add_user_form"):
+                col1, col2 = st.columns(2)
+                with col1:
+                    new_username = st.text_input("Username")
+                    new_password = st.text_input("Password", type="password")
+                with col2:
+                    confirm_password = st.text_input("Confirm Password", type="password")
+                    new_is_admin = st.checkbox("Admin")
+                submitted = st.form_submit_button("Create User")
+                if submitted:
+                    if new_password != confirm_password:
                         st.error("Passwords do not match")
+                    elif not new_username or not new_password:
+                        st.error("Username and password required")
                     else:
-                        ok, msg = create_user(u, p, admin)
+                        ok, msg = create_user(new_username, new_password, new_is_admin)
                         if ok:
-                            log_admin_action(st.session_state.user_id, "CREATE_USER", u)
+                            log_admin_action(st.session_state.user_id, "CREATE_USER", new_username)
                             st.success("User created")
                             st.rerun()
                         else:
                             st.error(msg)
 
         users_df = get_user_message_counts()
-        if not users_df.empty:
-            st.dataframe(users_df, use_container_width=True)
+        if users_df.empty:
+            st.info("No users found.")
+        else:
+            # Display main table with selected columns
+            display_columns = [
+                'username', 'is_admin', 'created_at', 'total_messages',
+                'success_rate', 'avg_response_time', 'last_active', 'most_used_model'
+            ]
+            rename_map = {
+                'username': 'Username',
+                'is_admin': 'Admin',
+                'created_at': 'Registered',
+                'total_messages': 'Total Msgs',
+                'success_rate': 'Success %',
+                'avg_response_time': 'Avg Resp (ms)',
+                'last_active': 'Last Active',
+                'most_used_model': 'Fav Model'
+            }
+            display_df = users_df[display_columns].rename(columns=rename_map)
+            st.dataframe(display_df, use_container_width=True)
+
+            # Debug: show raw dataframe if debug mode enabled
+            if st.session_state.get("debug_mode", False):
+                with st.expander("🔍 Raw Data (Debug)"):
+                    st.dataframe(users_df)
+
+            # Edit/Delete per user
+            st.markdown("### Edit / Delete Users")
             for _, row in users_df.iterrows():
-                if row["username"] == st.session_state.username:
-                    continue
-                with st.expander(f"Edit {row['username']}"):
+                if row['username'] == st.session_state.username:
+                    continue  # skip self
+                with st.expander(f"✏️ {row['username']} (ID: {row['id']})"):
                     col1, col2 = st.columns(2)
                     with col1:
-                        new_name = st.text_input("Username", value=row["username"], key=f"name_{row['username']}")
-                        new_admin = st.checkbox("Admin", value=row.get("is_admin", False), key=f"admin_{row['username']}")
+                        new_name = st.text_input("Username", value=row['username'], key=f"name_{row['id']}")
+                        new_admin = st.checkbox("Admin", value=bool(row['is_admin']), key=f"admin_{row['id']}")
                     with col2:
-                        new_pass = st.text_input("New Password (blank to keep)", type="password", key=f"pass_{row['username']}")
-                        if st.button("Update", key=f"upd_{row['username']}"):
-                            uid = users_df[users_df["username"] == row["username"]].iloc[0]["id"]
-                            ok, msg = update_user(uid, new_name, new_pass or None, new_admin)
+                        new_pass = st.text_input("New Password (leave blank to keep)", type="password", key=f"pass_{row['id']}")
+                        if st.button("Update", key=f"update_{row['id']}"):
+                            ok, msg = update_user(row['id'], new_name, new_pass or None, new_admin)
                             if ok:
                                 log_admin_action(st.session_state.user_id, "UPDATE_USER", new_name)
-                                st.success("Updated")
+                                st.success("User updated")
                                 st.rerun()
                             else:
                                 st.error(msg)
-                    if st.button("Delete", key=f"del_{row['username']}"):
-                        if st.checkbox(f"Confirm delete {row['username']}", key=f"conf_{row['username']}"):
-                            uid = users_df[users_df["username"] == row["username"]].iloc[0]["id"]
-                            ok, msg = delete_user(uid)
+                    if st.button("🗑️ Delete", key=f"delete_{row['id']}"):
+                        if st.checkbox(f"Confirm delete {row['username']}", key=f"confirm_{row['id']}"):
+                            ok, msg = delete_user(row['id'])
                             if ok:
-                                log_admin_action(st.session_state.user_id, "DELETE_USER", row["username"])
-                                st.success("Deleted")
+                                log_admin_action(st.session_state.user_id, "DELETE_USER", row['username'])
+                                st.success("User deleted")
                                 st.rerun()
                             else:
                                 st.error(msg)
-        else:
-            st.info("No users found.")
 
     with tabs[2]:
         st.subheader("Model Performance")
-        perf = get_model_performance(7)
-        if not perf.empty:
+        perf = get_model_performance(30)  # increased to 30 days
+        if perf.empty:
+            st.info("No model performance data yet.")
+        else:
             fig1 = px.line(perf, x="day", y="requests", color="model_key", title="Daily Requests")
             st.plotly_chart(fig1, use_container_width=True)
             fig2 = px.line(perf, x="day", y="avg_response", color="model_key", title="Avg Response Time (ms)")
             st.plotly_chart(fig2, use_container_width=True)
             fig3 = px.bar(perf, x="day", y="errors", color="model_key", title="Daily Errors")
             st.plotly_chart(fig3, use_container_width=True)
-        else:
-            st.info("No performance data yet.")
 
         st.subheader("User Activity")
         act = get_user_activity_summary(30)
-        if not act.empty:
+        if act.empty:
+            st.info("No user activity data yet.")
+        else:
             fig4 = px.line(act, x="day", y="active_users", title="Daily Active Users")
             st.plotly_chart(fig4)
             fig5 = px.line(act, x="day", y="total_queries", title="Daily Queries")
             st.plotly_chart(fig5)
-        else:
-            st.info("No activity data yet.")
 
         st.subheader("System Metrics History")
         sys_hist = get_system_metrics_history(24)
-        if not sys_hist.empty:
+        if sys_hist.empty:
+            st.info("No system metrics yet.")
+        else:
             fig6 = px.line(sys_hist, x="time", y=["cpu", "memory", "disk"], title="System Resources")
             st.plotly_chart(fig6)
-        else:
-            st.info("No system metrics yet.")
 
     with tabs[3]:
         st.subheader("Knowledge Base")
@@ -798,11 +883,11 @@ if st.session_state.admin_mode:
             else:
                 st.metric("Index Size", "N/A")
         kb_hist = get_kb_history(30)
-        if not kb_hist.empty:
+        if kb_hist.empty:
+            st.info("No knowledge base history yet. It will appear after the first rebuild.")
+        else:
             fig = px.line(kb_hist, x="time", y="doc_count", title="Document Count Over Time")
             st.plotly_chart(fig)
-        else:
-            st.info("No KB history yet.")
         if st.button("🔄 Rebuild Now"):
             if st.checkbox("Confirm rebuild"):
                 with st.spinner("Rebuilding..."):
@@ -832,10 +917,10 @@ if st.session_state.admin_mode:
             st.info("No active tasks.")
         st.subheader("Task History")
         hist = get_task_history(100)
-        if not hist.empty:
-            st.dataframe(hist)
-        else:
+        if hist.empty:
             st.info("No task history yet.")
+        else:
+            st.dataframe(hist)
 
     with tabs[5]:
         st.subheader("AI Insights")
@@ -846,10 +931,16 @@ if st.session_state.admin_mode:
                 st.warning(f"High error rate ({err_rate:.1%}) in last 24h")
             else:
                 st.success("Error rates normal")
+        else:
+            st.info("No recent performance data.")
+
         act = get_user_activity_summary(14)
-        if len(act) > 5:
+        if not act.empty and len(act) > 5:
             avg = act.tail(7)['total_queries'].mean()
             st.info(f"Forecast: ~{int(avg)} queries/day next week")
+        else:
+            st.info("Insufficient activity data for forecasting.")
+
         st.subheader("Recommendations")
         recs = []
         if VECTORDB_PATH.exists():

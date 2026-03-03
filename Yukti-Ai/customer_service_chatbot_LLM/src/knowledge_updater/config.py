@@ -1,42 +1,33 @@
 import os
 from pathlib import Path
 
-# ----------------------------------------------------------------------
-# Determine project root and data paths (matches langchain_helper.py)
-# ----------------------------------------------------------------------
-# __file__ is /.../src/knowledge_updater/config.py
-BASE_DIR = Path(__file__).parent.parent.parent.absolute()  # customer_service_chatbot_LLM/
-DATASET_DIR = BASE_DIR / "dataset"
-VECTORDB_PATH = BASE_DIR / "faiss_index"
+# Base directory of the project
+BASE_DIR = Path(__file__).parent.parent.absolute()
 
-# ----------------------------------------------------------------------
-# Source definitions – add all your knowledge sources here
-# ----------------------------------------------------------------------
+# Knowledge base paths
+VECTORDB_PATH = Path(os.getenv("FAISS_PATH", BASE_DIR / "faiss_index"))
+DATASET_PATH = BASE_DIR / "dataset" / "dataset.csv"
+
+# Sources for dynamic knowledge updater
 SOURCES = [
     {
         "type": "csv",
-        "path": str(DATASET_DIR / "dataset.csv"),
+        "path": str(DATASET_PATH),
         "name": "Original Dataset",
         "columns": ["prompt", "response"],
-        "content_template": "Q: {prompt}\nA: {response}",
-    },
-    # Example additional CSV source (uncomment after adding the file)
-    # {
-    #     "type": "csv",
-    #     "path": str(DATASET_DIR / "faq.csv"),
-    #     "name": "FAQ",
-    #     "columns": ["prompt", "response"],
-    #     "content_template": "Q: {prompt}\nA: {response}",
-    # },
-    # Future RSS source example:
-    # {
-    #     "type": "rss",
-    #     "url": "https://example.com/feed.xml",
-    #     "name": "Company Blog",
-    # },
+        "content_template": "Q: {prompt}\nA: {response}"
+    }
+    # Add more sources (rss, api) here as needed
 ]
 
-# ----------------------------------------------------------------------
-# Update interval (used only if you embed a scheduler inside the process)
-# ----------------------------------------------------------------------
-UPDATE_INTERVAL_HOURS = 1   # not used in standalone cron mode
+# Cache TTL for document retrieval (seconds)
+RETRIEVAL_CACHE_TTL = int(os.getenv("RETRIEVAL_CACHE_TTL", "3600"))
+
+# Task polling interval (seconds)
+TASK_POLL_INTERVAL = int(os.getenv("TASK_POLL_INTERVAL", "5"))
+
+# Concurrency limits (can be overridden by env)
+ASYNC_TASK_CONCURRENCY = int(os.getenv("ASYNC_TASK_CONCURRENCY", "5"))
+
+# Logging level
+LOG_LEVEL = os.getenv("LOG_LEVEL", "INFO")

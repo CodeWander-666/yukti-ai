@@ -199,6 +199,30 @@ def init_db():
 init_db()
 
 # ----------------------------------------------------------------------
+# Auto‑create admin user from environment variables (if no users exist)
+# ----------------------------------------------------------------------
+if os.getenv("ADMIN_PASSWORD"):
+    admin_username = os.getenv("ADMIN_USERNAME", "admin")
+    admin_pass = os.getenv("ADMIN_PASSWORD")
+    try:
+        conn = sqlite3.connect(str(DB_PATH))
+        c = conn.cursor()
+        # Check if any user exists
+        c.execute("SELECT COUNT(*) FROM users")
+        if c.fetchone()[0] == 0:
+            import bcrypt
+            hashed = bcrypt.hashpw(admin_pass.encode('utf-8'), bcrypt.gensalt()).decode('utf-8')
+            c.execute(
+                "INSERT INTO users (username, password_hash, is_admin) VALUES (?, ?, 1)",
+                (admin_username, hashed)
+            )
+            conn.commit()
+            logger.info(f"Created default admin user: {admin_username}")
+        conn.close()
+    except Exception as e:
+        logger.error(f"Failed to create default admin: {e}")
+
+# ----------------------------------------------------------------------
 # Password hashing (bcrypt)
 # ----------------------------------------------------------------------
 try:
@@ -250,7 +274,7 @@ def register_user(username: str, password: str) -> Tuple[bool, str]:
             conn.close()
             return False, "Username already exists"
         hashed = hash_password(password)
-        c.execute("INSERT INTO users (username, password_hash) VALUES (?, ?)", (username, hashed))
+        c.execute("INSERT INTO users (username, password_hash, is_admin) VALUES (?, ?, ?)", (username, hashed, 0))
         conn.commit()
         conn.close()
         return True, "User created successfully"
@@ -266,7 +290,7 @@ def log_user_activity(user_id: int, model_key: str, prompt_length: int,
         c = conn.cursor()
         c.execute(
             "INSERT INTO user_activity (user_id, model_key, prompt_length, response_time_ms, success, error) VALUES (?, ?, ?, ?, ?, ?)",
-            (user_id, model_key, prompt_length, response_time_ms, success, error)
+            (user_id, model_key, prompt_length, response_time_ms, 1 if success else 0, error)
         )
         conn.commit()
         conn.close()

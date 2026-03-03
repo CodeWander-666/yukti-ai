@@ -1,6 +1,6 @@
 """
 Core model orchestration – manages Zhipu (sync/async) and Gemini models
-with concurrency control, priority‑based fallback, and language integration.
+with concurrency control, per‑user task isolation, and language integration.
 Includes comprehensive error handling and fallbacks for missing dependencies.
 """
 
@@ -435,7 +435,7 @@ class GeminiClient:
         raise RuntimeError("Gemini service unavailable after retries")
 
 # ----------------------------------------------------------------------
-# Async Task Queue (with concurrency control and SQLite persistence)
+# Async Task Queue (with concurrency control, SQLite persistence, and user isolation)
 # ----------------------------------------------------------------------
 # Semaphores for async tasks per model
 _async_semaphores = {}
@@ -456,43 +456,44 @@ except ImportError:
     ZAI_AVAILABLE = False
     logger.warning("zai-sdk not installed; video generation disabled.")
 
+# Ensure tasks table has user_id column (migration)
+def _ensure_tasks_schema():
+    conn = sqlite3.connect(str(DB_PATH))
+    c = conn.cursor()
+    # Check if user_id column exists
+    c.execute("PRAGMA table_info(tasks)")
+    columns = [col[1] for col in c.fetchall()]
+    if 'user_id' not in columns:
+        logger.info("Adding user_id column to tasks table...")
+        c.execute("ALTER TABLE tasks ADD COLUMN user_id INTEGER")
+        c.execute("CREATE INDEX IF NOT EXISTS idx_tasks_user_id ON tasks(user_id)")
+        conn.commit()
+        logger.info("tasks table updated with user_id.")
+    conn.close()
+
+_ensure_tasks_schema()
+
 if ZAI_AVAILABLE and ZHIPU_AVAILABLE:
     class ZhipuTaskQueue:
         def __init__(self, db_path: str = str(DB_PATH)):
             self.db_path = db_path
             self.conn = sqlite3.connect(db_path, check_same_thread=False)
-            self._init_db()
+            self.conn.row_factory = sqlite3.Row
             self.lock = threading.Lock()
-            self.zhipu_map: Dict[str, str] = {}
+            self.zhipu_map: Dict[str, str] = {}  # local_id -> zhipu_task_id
+            self.user_map: Dict[str, int] = {}    # local_id -> user_id
             self._start_poller()
 
         def _init_db(self):
-            """Create tasks table if not exists."""
-            try:
-                self.conn.execute("""
-                    CREATE TABLE IF NOT EXISTS tasks (
-                        task_id TEXT PRIMARY KEY,
-                        variant TEXT,
-                        model TEXT,
-                        status TEXT,
-                        progress INTEGER,
-                        result_url TEXT,
-                        error TEXT,
-                        created_at TIMESTAMP,
-                        completed_at TIMESTAMP
-                    )
-                """)
-                self.conn.commit()
-            except Exception as e:
-                logger.exception("Failed to initialize task database")
-                raise
+            """Create tasks table if not exists (already done)."""
+            pass
 
-        def add_task(self, task_id: str, variant: str, model: str):
+        def add_task(self, task_id: str, variant: str, model: str, user_id: int):
             """Insert a new task record."""
             with self.lock:
                 self.conn.execute(
-                    "INSERT INTO tasks VALUES (?,?,?,?,?,?,?,?,?)",
-                    (task_id, variant, model, "submitted", 0, "", "", datetime.now(), None)
+                    "INSERT INTO tasks (task_id, variant, model, status, progress, user_id, created_at) VALUES (?,?,?,?,?,?,?)",
+                    (task_id, variant, model, "submitted", 0, user_id, datetime.now())
                 )
                 self.conn.commit()
 
@@ -510,26 +511,25 @@ if ZAI_AVAILABLE and ZHIPU_AVAILABLE:
             row = cursor.fetchone()
             if not row:
                 return None
-            return {
-                "task_id": row[0],
-                "variant": row[1],
-                "model": row[2],
-                "status": row[3],
-                "progress": row[4],
-                "result_url": row[5],
-                "error": row[6],
-                "created_at": row[7],
-                "completed_at": row[8],
-            }
+            return dict(row)
 
-        def get_active_tasks(self) -> List[Tuple[str, str, str, int]]:
-            """Return list of active (not completed/failed) tasks."""
-            cursor = self.conn.execute(
-                "SELECT task_id, variant, status, progress FROM tasks WHERE status IN ('submitted','pending','processing') ORDER BY created_at"
-            )
+        def get_active_tasks(self, user_id: Optional[int] = None) -> List[Tuple[str, str, str, int]]:
+            """
+            Return list of active (not completed/failed) tasks.
+            If user_id is given, return only tasks for that user.
+            """
+            if user_id is None:
+                cursor = self.conn.execute(
+                    "SELECT task_id, variant, status, progress FROM tasks WHERE status IN ('submitted','pending','processing') ORDER BY created_at"
+                )
+            else:
+                cursor = self.conn.execute(
+                    "SELECT task_id, variant, status, progress FROM tasks WHERE user_id=? AND status IN ('submitted','pending','processing') ORDER BY created_at",
+                    (user_id,)
+                )
             return cursor.fetchall()
 
-        def submit_async(self, variant: str, model: str, prompt: str, language: str = None, **kwargs) -> str:
+        def submit_async(self, variant: str, model: str, prompt: str, user_id: int, language: str = None, **kwargs) -> str:
             """Submit an async task, respecting concurrency limits."""
             sem = _get_async_semaphore(model)
             acquired = sem.acquire(blocking=True, timeout=60)
@@ -537,13 +537,15 @@ if ZAI_AVAILABLE and ZHIPU_AVAILABLE:
                 raise RuntimeError(f"Concurrency limit for {model} reached; try again later.")
 
             local_id = f"{variant}_{int(time.time())}_{abs(hash(prompt)) % 10000}"
-            self.add_task(local_id, variant, model)
+            self.add_task(local_id, variant, model, user_id)
             try:
                 client = ZhipuClient(ZHIPU_API_KEY)
                 zhipu_task_id = client.video_submit(model, prompt, language=language, **kwargs)
                 with self.lock:
                     self.zhipu_map[local_id] = zhipu_task_id
+                    self.user_map[local_id] = user_id
                 self.update_task(local_id, status="pending")
+                logger.info(f"Submitted video task {local_id} (Zhipu ID: {zhipu_task_id}) for user {user_id}")
             except Exception as e:
                 logger.exception("Failed to submit async task")
                 self.update_task(local_id, status="failed", error=str(e))
@@ -564,17 +566,24 @@ if ZAI_AVAILABLE and ZHIPU_AVAILABLE:
                         if hasattr(status_data, 'status') and status_data.status == "succeeded":
                             result_url = status_data.video_url
                             self.update_task(local_id, status="completed", progress=100,
-                                             result_url=result_url)
+                                             result_url=result_url, completed_at=datetime.now())
                             with self.lock:
                                 del self.zhipu_map[local_id]
+                                del self.user_map[local_id]
+                            logger.info(f"Task {local_id} completed: {result_url}")
                         elif hasattr(status_data, 'status') and status_data.status == "failed":
                             error = status_data.error if hasattr(status_data, 'error') else "Unknown error"
-                            self.update_task(local_id, status="failed", error=error)
+                            self.update_task(local_id, status="failed", error=error, completed_at=datetime.now())
                             with self.lock:
                                 del self.zhipu_map[local_id]
+                                del self.user_map[local_id]
+                            logger.error(f"Task {local_id} failed: {error}")
                         elif hasattr(status_data, 'status') and status_data.status == "processing":
                             progress = getattr(status_data, 'progress', 50)
                             self.update_task(local_id, status="processing", progress=progress)
+                        else:
+                            # Unknown status, keep as pending
+                            logger.debug(f"Task {local_id} status: {getattr(status_data, 'status', 'unknown')}")
                     except Exception as e:
                         logger.error(f"Polling task {local_id} failed: {e}")
                 time.sleep(TASK_POLL_INTERVAL)
@@ -588,15 +597,15 @@ else:
     class _DummyQueue:
         def submit_async(self, *args, **kwargs):
             raise RuntimeError("Video generation requires zai-sdk and Zhipu API key.")
-        def get_active_tasks(self):
+        def get_active_tasks(self, user_id=None):
             return []
         def get_task(self, task_id):
             return None
     _task_queue = _DummyQueue()
 
-def get_active_tasks() -> List[Tuple[str, str, str, int]]:
-    """Return list of active async tasks."""
-    return _task_queue.get_active_tasks()
+def get_active_tasks(user_id: Optional[int] = None) -> List[Tuple[str, str, str, int]]:
+    """Return list of active async tasks, optionally filtered by user_id."""
+    return _task_queue.get_active_tasks(user_id)
 
 def get_task_status(task_id: str) -> Optional[Dict[str, Any]]:
     """Return status of a specific task."""
@@ -630,7 +639,7 @@ class YuktiModel:
     def invoke(self, prompt: str, **kwargs) -> Any:
         """
         Invoke the service with fallback over its model list.
-        Extra kwargs (e.g., language) are passed to the underlying model.
+        Extra kwargs (e.g., language, user_id) are passed to the underlying model.
         """
         last_error = None
         for model_key in SERVICES[self.service]:
@@ -664,12 +673,16 @@ class YuktiModel:
         elif model_id in ["cogview-3-flash", "cogview-4"]:
             return client.image(model_id, prompt)
         elif model_id in ["cogvideox-3", "cogvideox-flash"]:
-            # IMPORTANT: pop 'language' to avoid duplicate argument
+            # IMPORTANT: pop 'language' and 'user_id' to avoid duplicate argument
             lang = kwargs.pop('language', None)
+            user_id = kwargs.pop('user_id', None)
+            if user_id is None:
+                raise RuntimeError("user_id is required for video tasks")
             return _task_queue.submit_async(
                 variant=self.service,
                 model=model_id,
                 prompt=prompt,
+                user_id=user_id,
                 language=lang,
                 **kwargs
             )

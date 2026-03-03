@@ -5,7 +5,6 @@ Includes comprehensive error handling and fallbacks for missing dependencies.
 """
 
 import os
-import sys
 import time
 import json
 import logging
@@ -19,39 +18,14 @@ from datetime import datetime
 from pathlib import Path
 from typing import Dict, Any, Optional, List, Tuple, Union
 
-# Optional imports – handle gracefully if missing
-try:
-    import streamlit as st
-    STREAMLIT_AVAILABLE = True
-except ImportError:
-    STREAMLIT_AVAILABLE = False
-    # Define a dummy secrets object for non‑Streamlit environments
-    class DummySecrets:
-        def get(self, key, default=None):
-            return os.getenv(key, default)
-    st = type('st', (), {'secrets': DummySecrets()})()
-
-try:
-    from langchain_openai import ChatOpenAI
-    LANGCHAIN_OPENAI_AVAILABLE = True
-except ImportError:
-    LANGCHAIN_OPENAI_AVAILABLE = False
-    ChatOpenAI = None
-
-try:
-    from zai import ZhipuAiClient
-    ZAI_AVAILABLE = True
-except ImportError:
-    ZAI_AVAILABLE = False
-    logging.warning("zai-sdk not installed; video generation disabled.")
-
-try:
-    from google import genai
-    from google.genai import types
-    GEMINI_SDK_AVAILABLE = True
-except ImportError:
-    GEMINI_SDK_AVAILABLE = False
-    logging.warning("google-genai not installed; Gemini models disabled.")
+# Import configuration
+from config import (
+    ZHIPU_API_KEY,
+    GOOGLE_API_KEY,
+    MODEL_CONCURRENCY,
+    TASK_POLL_INTERVAL,
+    DB_PATH,
+)
 
 # Import language utilities
 try:
@@ -65,7 +39,7 @@ except ImportError:
 logger = logging.getLogger(__name__)
 
 # ----------------------------------------------------------------------
-# Constants and Configuration
+# Constants and configuration
 # ----------------------------------------------------------------------
 ZHIPU_BASE_URL = "https://open.bigmodel.cn/api/paas/v4"
 
@@ -75,63 +49,63 @@ _MODEL_REGISTRY = {
         "model_id": "glm-4-flash",
         "provider": "zhipu",
         "type": "sync",
-        "concurrency_limit": 200,
+        "concurrency_limit": MODEL_CONCURRENCY.get("glm-4-flash", 200),
         "description": "GLM-4 Flash (fast, high concurrency)"
     },
     "glm-4-plus": {
         "model_id": "glm-4-plus",
         "provider": "zhipu",
         "type": "sync",
-        "concurrency_limit": 20,
+        "concurrency_limit": MODEL_CONCURRENCY.get("glm-4-plus", 20),
         "description": "GLM-4 Plus (balanced)"
     },
     "glm-5": {
         "model_id": "glm-5",
         "provider": "zhipu",
         "type": "sync",
-        "concurrency_limit": 3,
+        "concurrency_limit": MODEL_CONCURRENCY.get("glm-5", 3),
         "description": "GLM-5 (deep reasoning)"
     },
     "cogview-3-flash": {
         "model_id": "cogview-3-flash",
         "provider": "zhipu",
         "type": "sync",
-        "concurrency_limit": 10,
+        "concurrency_limit": MODEL_CONCURRENCY.get("cogview-3-flash", 10),
         "description": "CogView-3 Flash (fast image)"
     },
     "cogview-4": {
         "model_id": "cogview-4",
         "provider": "zhipu",
         "type": "sync",
-        "concurrency_limit": 5,
+        "concurrency_limit": MODEL_CONCURRENCY.get("cogview-4", 5),
         "description": "CogView-4 (high quality)"
     },
     "cogvideox-3": {
         "model_id": "cogvideox-3",
         "provider": "zhipu",
         "type": "async",
-        "concurrency_limit": 5,
+        "concurrency_limit": MODEL_CONCURRENCY.get("cogvideox-3", 5),
         "description": "CogVideoX-3"
     },
     "cogvideox-flash": {
         "model_id": "cogvideox-flash",
         "provider": "zhipu",
         "type": "async",
-        "concurrency_limit": 3,
+        "concurrency_limit": MODEL_CONCURRENCY.get("cogvideox-flash", 3),
         "description": "CogVideoX Flash"
     },
     "glm-4-voice": {
         "model_id": "glm-4-voice",
         "provider": "zhipu",
         "type": "sync",
-        "concurrency_limit": 5,
+        "concurrency_limit": MODEL_CONCURRENCY.get("glm-4-voice", 5),
         "description": "GLM-4 Voice"
     },
     "gemini": {
         "model_id": "gemini-dynamic",
         "provider": "gemini",
         "type": "sync",
-        "concurrency_limit": 60,
+        "concurrency_limit": MODEL_CONCURRENCY.get("gemini", 60),
         "description": "Google Gemini (dynamic selection)"
     }
 }
@@ -146,29 +120,9 @@ SERVICES = {
     "Gemini": ["gemini"]
 }
 
-# ----------------------------------------------------------------------
-# API Key Helpers (safe for both Streamlit and cron)
-# ----------------------------------------------------------------------
-def get_zhipu_api_key() -> Optional[str]:
-    """Retrieve Zhipu API key from secrets or environment."""
-    key = None
-    if STREAMLIT_AVAILABLE:
-        key = st.secrets.get("ZHIPU_API_KEY")
-    if not key:
-        key = os.getenv("ZHIPU_API_KEY")
-    return key
-
-def get_google_api_key() -> Optional[str]:
-    """Retrieve Google API key from secrets or environment."""
-    key = None
-    if STREAMLIT_AVAILABLE:
-        key = st.secrets.get("GOOGLE_API_KEY")
-    if not key:
-        key = os.getenv("GOOGLE_API_KEY")
-    return key
-
-ZHIPU_AVAILABLE = get_zhipu_api_key() is not None
-GEMINI_AVAILABLE = GEMINI_SDK_AVAILABLE and get_google_api_key() is not None
+# Availability flags (derived from API keys)
+ZHIPU_AVAILABLE = bool(ZHIPU_API_KEY)
+GEMINI_AVAILABLE = bool(GOOGLE_API_KEY)  # SDK presence checked later
 
 # ----------------------------------------------------------------------
 # Concurrency Tracker (for sync models)
@@ -235,7 +189,9 @@ class ZhipuClient:
 
     def text(self, model: str, prompt: str, temperature: float = 0.1, language: str = None) -> str:
         """Generate text with optional language hint."""
-        if not LANGCHAIN_OPENAI_AVAILABLE or ChatOpenAI is None:
+        try:
+            from langchain_openai import ChatOpenAI
+        except ImportError:
             raise RuntimeError("langchain-openai not installed. Cannot generate text.")
 
         # Determine target language
@@ -279,7 +235,7 @@ class ZhipuClient:
             return content
         except Exception as e:
             logger.exception("Text generation failed")
-            raise RuntimeError(f"Text generation error: {e}")
+            raise RuntimeError(f"Text generation error: {e}") from e
 
     def image(self, model: str, prompt: str) -> str:
         """Generate image and return URL."""
@@ -291,7 +247,7 @@ class ZhipuClient:
             return data["data"][0]["url"]
         except Exception as e:
             logger.exception("Image generation failed")
-            raise RuntimeError(f"Image generation error: {e}")
+            raise RuntimeError(f"Image generation error: {e}") from e
 
     def audio(self, model: str, prompt: str, voice: str = None, language: str = None) -> str:
         """Generate audio with optional language hint."""
@@ -317,18 +273,20 @@ class ZhipuClient:
             return path
         except Exception as e:
             logger.exception("Audio generation failed")
-            raise RuntimeError(f"Audio generation error: {e}")
+            raise RuntimeError(f"Audio generation error: {e}") from e
 
     def video_submit(self, model: str, prompt: str, language: str = None, **kwargs) -> str:
         """Submit a video generation task with optional language instruction."""
-        if not ZAI_AVAILABLE:
+        try:
+            from zai import ZhipuAiClient
+        except ImportError:
             raise RuntimeError("Video generation requires zai-sdk.")
+
         if language and language != 'en':
             lang_name = get_language_name(language)
             prompt = f"[Generate video with narration in {lang_name}]\n{prompt}"
 
         try:
-            from zai import ZhipuAiClient
             client = ZhipuAiClient(api_key=self.api_key)
             args = {
                 "model": model,
@@ -344,19 +302,20 @@ class ZhipuClient:
             return response.id
         except Exception as e:
             logger.exception("Video submission failed")
-            raise RuntimeError(f"Video submission error: {e}")
+            raise RuntimeError(f"Video submission error: {e}") from e
 
     def video_poll(self, task_id: str) -> dict:
         """Poll video task status."""
-        if not ZAI_AVAILABLE:
-            raise RuntimeError("Video generation requires zai-sdk.")
         try:
             from zai import ZhipuAiClient
+        except ImportError:
+            raise RuntimeError("Video generation requires zai-sdk.")
+        try:
             client = ZhipuAiClient(api_key=self.api_key)
             return client.videos.retrieve_videos_result(task_id)
         except Exception as e:
             logger.exception("Video polling failed")
-            raise RuntimeError(f"Video polling error: {e}")
+            raise RuntimeError(f"Video polling error: {e}") from e
 
 # ----------------------------------------------------------------------
 # Gemini Client (with dynamic model refresh and quota handling)
@@ -365,7 +324,15 @@ class GeminiClient:
     def __init__(self, api_key: str):
         if not api_key:
             raise ValueError("Google API key is required.")
-        self.client = genai.Client(api_key=api_key)
+        try:
+            from google import genai
+            from google.genai import types
+            self.genai = genai
+            self.types = types
+        except ImportError:
+            raise RuntimeError("google-genai not installed. Gemini models disabled.")
+
+        self.client = self.genai.Client(api_key=api_key)
         self._available_models = None
         self._selected_model = None
         self._last_refresh = 0
@@ -378,7 +345,7 @@ class GeminiClient:
             try:
                 models = self.client.models.list()
                 self._available_models = [
-                    m.name for m in models 
+                    m.name for m in models
                     if 'generateContent' in (getattr(m, 'supported_actions', []) or [])
                 ]
                 self._last_refresh = now
@@ -443,7 +410,7 @@ class GeminiClient:
                 response = self.client.models.generate_content(
                     model=self._selected_model,
                     contents=full_prompt,
-                    config=types.GenerateContentConfig(
+                    config=self.types.GenerateContentConfig(
                         temperature=temperature,
                         max_output_tokens=2048
                     )
@@ -463,7 +430,7 @@ class GeminiClient:
                         logger.info(f"Switching to fallback model: {self._selected_model}")
                         return self.text(prompt, temperature, language)
                 logger.exception("Gemini invocation failed")
-                raise RuntimeError(f"Gemini error: {e}")
+                raise RuntimeError(f"Gemini error: {e}") from e
 
         raise RuntimeError("Gemini service unavailable after retries")
 
@@ -481,9 +448,17 @@ def _get_async_semaphore(model_key: str) -> threading.Semaphore:
             _async_semaphores[model_key] = threading.Semaphore(limit)
         return _async_semaphores[model_key]
 
+# Check if zai-sdk is available
+try:
+    from zai import ZhipuAiClient
+    ZAI_AVAILABLE = True
+except ImportError:
+    ZAI_AVAILABLE = False
+    logger.warning("zai-sdk not installed; video generation disabled.")
+
 if ZAI_AVAILABLE and ZHIPU_AVAILABLE:
     class ZhipuTaskQueue:
-        def __init__(self, db_path: str = "yukti_tasks.db"):
+        def __init__(self, db_path: str = str(DB_PATH)):
             self.db_path = db_path
             self.conn = sqlite3.connect(db_path, check_same_thread=False)
             self._init_db()
@@ -564,10 +539,7 @@ if ZAI_AVAILABLE and ZHIPU_AVAILABLE:
             local_id = f"{variant}_{int(time.time())}_{abs(hash(prompt)) % 10000}"
             self.add_task(local_id, variant, model)
             try:
-                api_key = get_zhipu_api_key()
-                if not api_key:
-                    raise RuntimeError("Zhipu API key not configured.")
-                client = ZhipuClient(api_key)
+                client = ZhipuClient(ZHIPU_API_KEY)
                 zhipu_task_id = client.video_submit(model, prompt, language=language, **kwargs)
                 with self.lock:
                     self.zhipu_map[local_id] = zhipu_task_id
@@ -581,15 +553,13 @@ if ZAI_AVAILABLE and ZHIPU_AVAILABLE:
 
         def _poll_tasks(self):
             """Background thread that polls all pending tasks."""
-            from config import TASK_POLL_INTERVAL
             while True:
                 tasks = []
                 with self.lock:
                     tasks = list(self.zhipu_map.items())
                 for local_id, zhipu_id in tasks:
                     try:
-                        api_key = get_zhipu_api_key()
-                        client = ZhipuClient(api_key)
+                        client = ZhipuClient(ZHIPU_API_KEY)
                         status_data = client.video_poll(zhipu_id)
                         if hasattr(status_data, 'status') and status_data.status == "succeeded":
                             result_url = status_data.video_url
@@ -613,7 +583,7 @@ if ZAI_AVAILABLE and ZHIPU_AVAILABLE:
             thread = threading.Thread(target=self._poll_tasks, daemon=True)
             thread.start()
 
-    _task_queue = ZhipuTaskQueue(db_path=str(Path(__file__).parent.parent / "yukti_tasks.db"))
+    _task_queue = ZhipuTaskQueue()
 else:
     class _DummyQueue:
         def submit_async(self, *args, **kwargs):
@@ -654,8 +624,8 @@ class YuktiModel:
             raise ValueError(f"Unknown service: {service}")
         first_model = SERVICES[service][0]
         self.provider = _MODEL_REGISTRY[first_model]["provider"]
-        self.zhipu_api_key = get_zhipu_api_key()
-        self.gemini_api_key = get_google_api_key()
+        self.zhipu_api_key = ZHIPU_API_KEY
+        self.gemini_api_key = GOOGLE_API_KEY
 
     def invoke(self, prompt: str, **kwargs) -> Any:
         """
@@ -694,7 +664,7 @@ class YuktiModel:
         elif model_id in ["cogview-3-flash", "cogview-4"]:
             return client.image(model_id, prompt)
         elif model_id in ["cogvideox-3", "cogvideox-flash"]:
-            # IMPORTANT FIX: pop 'language' to avoid duplicate argument
+            # IMPORTANT: pop 'language' to avoid duplicate argument
             lang = kwargs.pop('language', None)
             return _task_queue.submit_async(
                 variant=self.service,
@@ -710,7 +680,7 @@ class YuktiModel:
             raise ValueError(f"Unsupported model: {model_id}")
 
     def _call_gemini_model(self, prompt: str, **kwargs) -> str:
-        if not GEMINI_AVAILABLE:
+        if not self.gemini_api_key:
             raise RuntimeError("Gemini not available")
         client = GeminiClient(self.gemini_api_key)
         return client.text(prompt, temperature=kwargs.get("temperature", 0.1),
@@ -729,7 +699,12 @@ def get_available_models() -> List[str]:
                 available.append(service)
         elif service == "Gemini":
             if GEMINI_AVAILABLE:
-                available.append(service)
+                # Check if google-genai is installed
+                try:
+                    import google.genai
+                    available.append(service)
+                except ImportError:
+                    pass
     return available
 
 def get_service_config(service: str) -> Optional[Dict[str, Any]]:

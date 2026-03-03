@@ -199,25 +199,32 @@ def init_db():
 init_db()
 
 # ----------------------------------------------------------------------
-# Auto‑create admin user from environment variables (if no users exist)
+# Auto‑create admin user from secrets (Streamlit secrets or environment)
 # ----------------------------------------------------------------------
-if os.getenv("ADMIN_PASSWORD"):
-    admin_username = os.getenv("ADMIN_USERNAME", "admin")
-    admin_pass = os.getenv("ADMIN_PASSWORD")
+def get_secret(key: str, default=None):
+    """Get a secret from Streamlit secrets or environment variable."""
+    try:
+        return st.secrets.get(key, os.getenv(key, default))
+    except:
+        return os.getenv(key, default)
+
+admin_user = get_secret("ADMIN_USERNAME", "admin")
+admin_pass = get_secret("ADMIN_PASSWORD")
+
+if admin_pass:
     try:
         conn = sqlite3.connect(str(DB_PATH))
         c = conn.cursor()
-        # Check if any user exists
         c.execute("SELECT COUNT(*) FROM users")
         if c.fetchone()[0] == 0:
             import bcrypt
             hashed = bcrypt.hashpw(admin_pass.encode('utf-8'), bcrypt.gensalt()).decode('utf-8')
             c.execute(
                 "INSERT INTO users (username, password_hash, is_admin) VALUES (?, ?, 1)",
-                (admin_username, hashed)
+                (admin_user, hashed)
             )
             conn.commit()
-            logger.info(f"Created default admin user: {admin_username}")
+            logger.info(f"Created default admin user: {admin_user}")
         conn.close()
     except Exception as e:
         logger.error(f"Failed to create default admin: {e}")

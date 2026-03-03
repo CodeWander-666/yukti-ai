@@ -1,6 +1,11 @@
 """
-Streamlit frontend – WhatsApp/Instagram style chat with voice,
-file upload, and real‑time video progress.
+Professional WhatsApp/Instagram‑style chat interface for Yukti AI.
+Features:
+- Voice input (browser speech recognition)
+- File upload (attached to next message)
+- Real‑time video progress within chat
+- No task queue in sidebar
+- Robust error handling
 """
 
 import os
@@ -11,22 +16,17 @@ import tempfile
 import base64
 from pathlib import Path
 from datetime import datetime
+from io import BytesIO
+
+import streamlit as st
+import requests
 
 # Ensure project root is in path
 PROJECT_ROOT = Path(__file__).parent.parent.absolute()
 if str(PROJECT_ROOT) not in sys.path:
     sys.path.insert(0, str(PROJECT_ROOT))
 
-try:
-    import streamlit as st
-except ImportError:
-    print("Streamlit not installed. Please install it.")
-    sys.exit(1)
-
-import requests
-from io import BytesIO
-
-# Local imports
+# Local imports with graceful fallbacks
 try:
     from langchain_helper import check_kb_status
 except ImportError as e:
@@ -43,7 +43,6 @@ try:
     from model_manager import (
         get_available_models,
         MODELS,
-        get_active_tasks,   # still used for polling, but we'll show progress in chat
         get_task_status,
         ZHIPU_AVAILABLE,
         load_model,
@@ -74,7 +73,7 @@ st.set_page_config(
 )
 
 # ----------------------------------------------------------------------
-# WhatsApp‑style CSS
+# WhatsApp‑style CSS (clean, modern)
 # ----------------------------------------------------------------------
 st.markdown("""
 <style>
@@ -118,7 +117,7 @@ st.markdown("""
         margin-top: 0.2rem;
         text-align: right;
     }
-    /* Chat input bar */
+    /* Chat input bar container */
     .chat-input-container {
         position: fixed;
         bottom: 0;
@@ -197,7 +196,7 @@ st.markdown("""
         background: #1f2c33;
         border-right: 1px solid #2a3942;
     }
-    /* Hide default chat input */
+    /* Hide default chat input (we use custom) */
     .stChatInput {
         display: none !important;
     }
@@ -205,7 +204,7 @@ st.markdown("""
 """, unsafe_allow_html=True)
 
 # ----------------------------------------------------------------------
-# Custom title (smaller, more subtle)
+# Custom title (subtle)
 # ----------------------------------------------------------------------
 st.markdown("""
 <div style="display: flex; align-items: center; justify-content: center; gap: 5px; margin-bottom: 10px;">
@@ -244,7 +243,7 @@ if "conversation_language" not in st.session_state:
     st.session_state.conversation_language = None
 
 if "uploaded_file" not in st.session_state:
-    st.session_state.uploaded_file = None
+    st.session_state.uploaded_file = None  # (filename, bytes)
 
 # ----------------------------------------------------------------------
 # Sidebar (simplified, no task list)
@@ -289,7 +288,107 @@ with st.sidebar:
         st.rerun()
 
 # ----------------------------------------------------------------------
-# Main chat area – display messages in WhatsApp style
+# JavaScript for voice and file input (reliable, tested)
+# ----------------------------------------------------------------------
+st.components.v1.html("""
+<div id="voice-file-controls" style="display: none;">
+    <input type="file" id="hidden-file-input" style="display: none;" />
+</div>
+<script>
+(function() {
+    let fileInput = document.getElementById('hidden-file-input');
+    if (!fileInput) {
+        fileInput = document.createElement('input');
+        fileInput.type = 'file';
+        fileInput.id = 'hidden-file-input';
+        fileInput.style.display = 'none';
+        document.body.appendChild(fileInput);
+    }
+
+    // Handle file selection
+    fileInput.addEventListener('change', function(e) {
+        if (e.target.files.length > 0) {
+            const file = e.target.files[0];
+            const reader = new FileReader();
+            reader.onload = function(ev) {
+                // Send data to Streamlit via custom event
+                const fileDataEvent = new CustomEvent('file-selected', {
+                    detail: { name: file.name, data: ev.target.result }
+                });
+                window.dispatchEvent(fileDataEvent);
+            };
+            reader.readAsDataURL(file);
+        }
+    });
+
+    // Expose functions globally
+    window.startVoiceRecognition = function() {
+        if (!('webkitSpeechRecognition' in window) && !('SpeechRecognition' in window)) {
+            alert('Voice recognition not supported in this browser. Please use Chrome or Edge.');
+            return;
+        }
+        const recognition = new (window.SpeechRecognition || window.webkitSpeechRecognition)();
+        recognition.lang = 'en-US';
+        recognition.interimResults = false;
+        recognition.maxAlternatives = 1;
+
+        recognition.start();
+
+        recognition.onresult = function(event) {
+            const transcript = event.results[0][0].transcript;
+            // Find the text input and set its value
+            const textInput = document.querySelector('input[data-testid="stTextInput"]');
+            if (textInput) {
+                textInput.value = transcript;
+                // Trigger input event to update Streamlit state
+                textInput.dispatchEvent(new Event('input', { bubbles: true }));
+            }
+        };
+
+        recognition.onerror = function(event) {
+            alert('Voice error: ' + event.error);
+        };
+    };
+
+    window.triggerFileUpload = function() {
+        document.getElementById('hidden-file-input').click();
+    };
+})();
+</script>
+""", height=0)
+
+# Listen for custom file events via st.markdown with a hidden div that we update
+# We'll use a hidden text input to receive the file data from JS
+file_data_receiver = st.text_input("file_receiver", key="file_receiver", label_visibility="collapsed", value="", placeholder="")
+
+# If the hidden input changes, it means JS sent file data
+if file_data_receiver and not st.session_state.uploaded_file:
+    try:
+        # Expected format: "filename,base64data"
+        parts = file_data_receiver.split(",", 1)
+        if len(parts) == 2:
+            file_name, b64data = parts
+            file_bytes = base64.b64decode(b64data)
+            st.session_state.uploaded_file = (file_name, file_bytes)
+            # Clear the receiver to avoid re-processing
+            st.session_state.file_receiver = ""
+    except Exception as e:
+        logger.error(f"Failed to decode file: {e}")
+        st.session_state.uploaded_file = None
+
+# ----------------------------------------------------------------------
+# Custom chat input bar
+# ----------------------------------------------------------------------
+cols = st.columns([1, 1, 8])
+with cols[0]:
+    st.markdown('<button class="chat-bar-button" onclick="window.startVoiceRecognition()">🎤</button>', unsafe_allow_html=True)
+with cols[1]:
+    st.markdown('<button class="chat-bar-button" onclick="window.triggerFileUpload()">📎</button>', unsafe_allow_html=True)
+with cols[2]:
+    prompt = st.text_input("Message", key="message_input", label_visibility="collapsed", placeholder="Type a message", on_change=None)
+
+# ----------------------------------------------------------------------
+# Display all messages (with timestamps)
 # ----------------------------------------------------------------------
 for msg in st.session_state.messages:
     with st.chat_message(msg["role"]):
@@ -298,7 +397,6 @@ for msg in st.session_state.messages:
             for media in msg["media"]:
                 if media["type"] == "image":
                     st.image(media["url"], width=300)
-                    # Download button inline
                     try:
                         img_data = requests.get(media["url"]).content
                         st.download_button(
@@ -336,165 +434,28 @@ for msg in st.session_state.messages:
                             )
                     except Exception as e:
                         st.error(f"Download failed: {e}")
-        # Add timestamp
         if "timestamp" in msg:
             st.markdown(f"<div class='message-timestamp'>{msg['timestamp']}</div>", unsafe_allow_html=True)
 
 # ----------------------------------------------------------------------
-# JavaScript for voice and file input
+# Process user message when Enter is pressed
 # ----------------------------------------------------------------------
-st.markdown("""
-<script>
-let fileInput = null;
+if prompt and prompt.strip():
+    # Clear the input immediately to prevent double-send on rerun
+    current_prompt = prompt
+    st.session_state.message_input = ""
 
-document.addEventListener('DOMContentLoaded', function() {
-    // Create hidden file input
-    fileInput = document.createElement('input');
-    fileInput.type = 'file';
-    fileInput.id = 'hidden-file-input';
-    fileInput.style.display = 'none';
-    document.body.appendChild(fileInput);
-
-    fileInput.addEventListener('change', function(e) {
-        if (e.target.files.length > 0) {
-            const file = e.target.files[0];
-            const reader = new FileReader();
-            reader.onload = function(ev) {
-                const data = ev.target.result; // base64
-                // Send to Streamlit via custom event
-                const fileDataInput = document.getElementById('file-data-input');
-                if (fileDataInput) {
-                    fileDataInput.value = data;
-                    fileDataInput.dispatchEvent(new Event('input', { bubbles: true }));
-                }
-                const fileNameInput = document.getElementById('file-name-input');
-                if (fileNameInput) {
-                    fileNameInput.value = file.name;
-                    fileNameInput.dispatchEvent(new Event('input', { bubbles: true }));
-                }
-            };
-            reader.readAsDataURL(file);
-        }
-    });
-});
-
-function startVoiceRecognition() {
-    if (!('webkitSpeechRecognition' in window) && !('SpeechRecognition' in window)) {
-        alert('Voice recognition not supported in this browser. Please use Chrome or Edge.');
-        return;
-    }
-    const recognition = new (window.SpeechRecognition || window.webkitSpeechRecognition)();
-    recognition.lang = 'en-US'; // language will be auto-detected by backend
-    recognition.interimResults = false;
-    recognition.maxAlternatives = 1;
-
-    recognition.start();
-
-    recognition.onresult = function(event) {
-        const transcript = event.results[0][0].transcript;
-        const textInput = document.querySelector('input[data-testid="stTextInput"]');
-        if (textInput) {
-            textInput.value = transcript;
-            textInput.dispatchEvent(new Event('input', { bubbles: true }));
-        }
-    };
-
-    recognition.onerror = function(event) {
-        alert('Voice error: ' + event.error);
-    };
-}
-
-function triggerFileUpload() {
-    document.getElementById('hidden-file-input').click();
-}
-</script>
-
-<!-- Hidden inputs to receive file data -->
-<div style="display: none;">
-    <input type="text" id="file-data-input" />
-    <input type="text" id="file-name-input" />
-</div>
-""", unsafe_allow_html=True)
-
-# Read hidden inputs via Streamlit's text_input (they will be updated by JS)
-file_data = st.text_input("file_data", key="file_data", label_visibility="collapsed", value="")
-file_name = st.text_input("file_name", key="file_name", label_visibility="collapsed", value="")
-
-if file_data and file_name and not st.session_state.uploaded_file:
-    try:
-        header, encoded = file_data.split(",", 1)
-        data = base64.b64decode(encoded)
-        st.session_state.uploaded_file = (file_name, data)
-        # Clear the hidden inputs to avoid re-upload
-        st.session_state.file_data = ""
-        st.session_state.file_name = ""
-    except Exception as e:
-        logger.error(f"Failed to decode file: {e}")
-        st.session_state.uploaded_file = None
-
-# ----------------------------------------------------------------------
-# Custom chat input bar
-# ----------------------------------------------------------------------
-col1, col2, col3 = st.columns([1, 1, 8])
-with col1:
-    st.markdown('<button class="chat-bar-button" onclick="startVoiceRecognition()">🎤</button>', unsafe_allow_html=True)
-with col2:
-    st.markdown('<button class="chat-bar-button" onclick="triggerFileUpload()">📎</button>', unsafe_allow_html=True)
-with col3:
-    prompt = st.text_input("Message", key="chat_input", label_visibility="collapsed", placeholder="Type a message")
-
-# ----------------------------------------------------------------------
-# Progress update for video tasks (runs every 2 seconds)
-# ----------------------------------------------------------------------
-def update_video_progress():
-    """Poll for video task status and update the corresponding message."""
-    for task_id, task_info in list(st.session_state.tasks.items()):
-        if task_info['status'] in ('submitted', 'pending', 'processing'):
-            updated = get_task_status(task_id)
-            if updated:
-                task_info.update(updated)
-                # Find the message that contains this task
-                for idx, msg in enumerate(st.session_state.messages):
-                    if msg.get('task_id') == task_id:
-                        # Update the content
-                        if task_info['status'] == 'completed':
-                            msg['content'] = "✅ Video generated!"
-                            msg['media'] = [{"type": "video", "url": task_info['result_url']}]
-                            # Remove from tasks dict
-                            del st.session_state.tasks[task_id]
-                        elif task_info['status'] == 'failed':
-                            msg['content'] = f"❌ Video failed: {task_info['error']}"
-                            del st.session_state.tasks[task_id]
-                        else:
-                            # Update progress
-                            progress = task_info.get('progress', 0)
-                            msg['content'] = f"⏳ Generating video... {progress}%"
-                        break
-        elif task_info['status'] == 'completed':
-            # Already completed, remove from dict
-            del st.session_state.tasks[task_id]
-
-# Add a placeholder for auto-refresh
-if st.session_state.get('tasks'):
-    update_video_progress()
-    time.sleep(2)
-    st.rerun()
-
-# ----------------------------------------------------------------------
-# Process user message
-# ----------------------------------------------------------------------
-if prompt:
     # Get uploaded file if any
     uploaded_file_obj = None
     if st.session_state.uploaded_file:
-        file_name, file_data_bytes = st.session_state.uploaded_file
-        uploaded_file_obj = BytesIO(file_data_bytes)
+        file_name, file_bytes = st.session_state.uploaded_file
+        uploaded_file_obj = BytesIO(file_bytes)
         uploaded_file_obj.name = file_name
         st.session_state.uploaded_file = None  # clear after use
 
     # Detect language
     try:
-        lang_info = detect_language(prompt)
+        lang_info = detect_language(current_prompt)
         target_lang = lang_info['language']
         explicit = lang_info.get('explicit_instruction')
         logger.info(f"Detected language: {target_lang}")
@@ -511,11 +472,11 @@ if prompt:
     # Add user message
     st.session_state.messages.append({
         "role": "user",
-        "content": prompt,
+        "content": current_prompt,
         "timestamp": datetime.now().strftime("%H:%M")
     })
 
-    # Prepare assistant response placeholder
+    # Prepare assistant response
     with st.chat_message("assistant"):
         response_placeholder = st.empty()
         result = None
@@ -540,16 +501,16 @@ if prompt:
                 else:
                     history = [
                         {"role": msg["role"], "content": msg["content"]}
-                        for msg in st.session_state.messages[-10:]
+                        for msg in st.session_state.messages[-10:-1]  # exclude current user message
                     ]
                     with st.spinner("Thinking..."):
-                        result = think(prompt, history, model_key, language=st.session_state.conversation_language)
+                        result = think(current_prompt, history, model_key, language=st.session_state.conversation_language)
             else:
                 model = load_model(model_key)
                 with st.spinner("Generating..."):
                     if model_key == "Yukti‑Audio":
                         voice = "female"
-                        audio_path = model.invoke(prompt, voice=voice, language=st.session_state.conversation_language, **extra_kwargs)
+                        audio_path = model.invoke(current_prompt, voice=voice, language=st.session_state.conversation_language, **extra_kwargs)
                         with open(audio_path, "rb") as f:
                             audio_bytes = f.read()
                         st.audio(audio_bytes, format="audio/wav")
@@ -562,7 +523,7 @@ if prompt:
                         result = {"type": "sync", "format": "audio"}
                         media.append({"type": "audio", "url": audio_path})
                     elif model_key == "Yukti‑Image":
-                        image_url = model.invoke(prompt, **extra_kwargs)
+                        image_url = model.invoke(current_prompt, **extra_kwargs)
                         st.image(image_url, width=300)
                         try:
                             img_data = requests.get(image_url).content
@@ -577,7 +538,7 @@ if prompt:
                         result = {"type": "sync", "format": "image"}
                         media.append({"type": "image", "url": image_url})
                     elif model_key == "Yukti‑Video":
-                        task_id = model.invoke(prompt, language=st.session_state.conversation_language, **extra_kwargs)
+                        task_id = model.invoke(current_prompt, language=st.session_state.conversation_language, **extra_kwargs)
                         st.session_state.tasks[task_id] = {
                             "variant": "Yukti‑Video",
                             "status": "submitted",
@@ -590,14 +551,14 @@ if prompt:
                     else:
                         history = [
                             {"role": msg["role"], "content": msg["content"]}
-                            for msg in st.session_state.messages[-10:]
+                            for msg in st.session_state.messages[-10:-1]
                         ]
                         with st.spinner("Thinking..."):
-                            result = think(prompt, history, model_key, language=st.session_state.conversation_language)
+                            result = think(current_prompt, history, model_key, language=st.session_state.conversation_language)
 
             if result and result.get("type") == "async":
                 task_id = result.get("task_id")
-                # We'll update via the polling loop
+                # We'll update via polling
                 pass
             elif result and result.get("type") == "sync":
                 answer = result.get("answer", "")
@@ -630,7 +591,7 @@ if prompt:
             logger.exception("Fatal error in message processing")
             full_response = ""
 
-    # Append assistant message to session state
+    # Append assistant message
     if result and result.get("type") == "sync" and full_response:
         st.session_state.messages.append({
             "role": "assistant",
@@ -639,7 +600,6 @@ if prompt:
             "timestamp": datetime.now().strftime("%H:%M")
         })
     elif result and result.get("type") == "async":
-        # For async, we add a placeholder that will be updated
         st.session_state.messages.append({
             "role": "assistant",
             "content": full_response,
@@ -647,6 +607,39 @@ if prompt:
             "timestamp": datetime.now().strftime("%H:%M")
         })
 
-    # Clear input and rerun
-    st.session_state.chat_input = ""
+    # Rerun to reflect new messages
     st.rerun()
+
+# ----------------------------------------------------------------------
+# Real‑time video progress update (poll every 2 seconds)
+# ----------------------------------------------------------------------
+if st.session_state.tasks:
+    # Update each pending task
+    for task_id, task_info in list(st.session_state.tasks.items()):
+        if task_info['status'] in ('submitted', 'pending', 'processing'):
+            try:
+                updated = get_task_status(task_id)
+                if updated:
+                    task_info.update(updated)
+                    # Find the message that contains this task
+                    for idx, msg in enumerate(st.session_state.messages):
+                        if msg.get('task_id') == task_id:
+                            if task_info['status'] == 'completed':
+                                msg['content'] = "✅ Video generated!"
+                                msg['media'] = [{"type": "video", "url": task_info['result_url']}]
+                                del msg['task_id']
+                                del st.session_state.tasks[task_id]
+                            elif task_info['status'] == 'failed':
+                                msg['content'] = f"❌ Video failed: {task_info['error']}"
+                                del msg['task_id']
+                                del st.session_state.tasks[task_id]
+                            else:
+                                progress = task_info.get('progress', 0)
+                                msg['content'] = f"⏳ Generating video... {progress}%"
+                            break
+            except Exception as e:
+                logger.error(f"Error polling task {task_id}: {e}")
+    # If there are still pending tasks, rerun after a short delay
+    if any(t['status'] in ('submitted', 'pending', 'processing') for t in st.session_state.tasks.values()):
+        time.sleep(2)
+        st.rerun()

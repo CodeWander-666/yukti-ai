@@ -1,207 +1,116 @@
 """
-Connectors for various data sources (CSV, RSS, API).
-Each function returns a list of LangChain Document objects.
-Includes comprehensive error handling and logging.
+Data source connectors for knowledge updater.
+Supports CSV files, RSS feeds, REST APIs, and local uploads.
 """
 
-import os
 import logging
-import requests
 import pandas as pd
+import requests
 import feedparser
-from datetime import datetime
-from typing import List, Dict, Any
+from pathlib import Path
+from typing import List, Dict, Any, Generator
 from langchain_core.documents import Document
+from langchain_community.document_loaders import CSVLoader, TextLoader, PyPDFLoader
+
+from .config import DATASET_PATH, UPLOADS_PATH, SOURCES
 
 logger = logging.getLogger(__name__)
 
-# ----------------------------------------------------------------------
-# CSV Connector – robust encoding fallback and error handling
-# ----------------------------------------------------------------------
-def fetch_csv(source: Dict[str, Any]) -> List[Document]:
-    """
-    Reads a CSV file and converts each row into a LangChain Document.
-    Handles common encodings and malformed lines gracefully.
-    """
-    path = source["path"]
-    if not os.path.exists(path):
-        logger.warning(f"CSV file not found: {path}")
+def fetch_csv(file_path: Path) -> List[Document]:
+    """Read a CSV file with multiple encoding fallbacks."""
+    if not file_path.exists():
+        logger.warning(f"CSV file not found: {file_path}")
         return []
-
-    # Try multiple encodings in order of likelihood
     encodings = ['utf-8', 'cp1252', 'latin-1', 'iso-8859-1']
-    df = None
-    last_error = None
     for enc in encodings:
         try:
-            df = pd.read_csv(path, encoding=enc, on_bad_lines='skip')
-            logger.info(f"Successfully read {path} with encoding {enc}")
-            break
-        except UnicodeDecodeError as e:
-            last_error = e
+            loader = CSVLoader(str(file_path), encoding=enc)
+            docs = loader.load()
+            logger.info(f"Loaded {len(docs)} documents from {file_path.name} (encoding {enc})")
+            return docs
+        except UnicodeDecodeError:
             continue
-        except pd.errors.EmptyDataError as e:
-            logger.error(f"CSV file {path} is empty: {e}")
-            return []
-        except pd.errors.ParserError as e:
-            logger.error(f"CSV parsing error in {path}: {e}")
-            return []
         except Exception as e:
-            logger.warning(f"Unexpected error reading {path} with {enc}: {e}")
-            last_error = e
-            continue
+            logger.warning(f"Failed to load {file_path} with {enc}: {e}")
+    logger.error(f"Could not read {file_path} with any encoding.")
+    return []
 
-    if df is None:
-        logger.error(f"Could not read {path} with any tried encoding. Last error: {last_error}")
+def fetch_uploads() -> List[Document]:
+    """Scan UPLOADS_PATH for supported files and load them."""
+    supported_extensions = {'.csv': CSVLoader, '.txt': TextLoader, '.pdf': PyPDFLoader}
+    docs = []
+    for file_path in UPLOADS_PATH.glob("*"):
+        if file_path.suffix.lower() in supported_extensions:
+            loader_class = supported_extensions[file_path.suffix.lower()]
+            try:
+                loader = loader_class(str(file_path))
+                file_docs = loader.load()
+                docs.extend(file_docs)
+                logger.info(f"Loaded {len(file_docs)} docs from {file_path.name}")
+            except Exception as e:
+                logger.error(f"Failed to load {file_path.name}: {e}")
+    return docs
+
+def fetch_rss(feed_config: Dict[str, Any]) -> List[Document]:
+    """Fetch entries from an RSS feed."""
+    if not feed_config.get("enabled", False):
         return []
-
-    # Validate required columns
-    columns = source.get("columns", ["prompt", "response"])
-    missing = [c for c in columns if c not in df.columns]
-    if missing:
-        logger.error(f"CSV {path} missing required columns: {missing}")
-        return []
-
-    template = source.get("content_template", "Q: {prompt}\nA: {response}")
-    documents = []
-    skipped = 0
-    for idx, row in df.iterrows():
-        try:
-            content = template.format(**{c: row[c] for c in columns})
-            doc = Document(
-                page_content=content,
-                metadata={
-                    "source": str(path),
-                    "row": int(idx),
-                    "source_name": source.get("name", "CSV"),
-                    "fetched_at": datetime.now().isoformat()
-                }
-            )
-            documents.append(doc)
-        except KeyError as e:
-            logger.warning(f"Row {idx} missing column {e} – skipping")
-            skipped += 1
-        except Exception as e:
-            logger.warning(f"Row {idx} formatting error: {e}")
-            skipped += 1
-
-    if skipped:
-        logger.info(f"Skipped {skipped} rows due to errors in {source.get('name', path)}")
-    logger.info(f"Loaded {len(documents)} documents from {source.get('name', path)}")
-    return documents
-
-
-# ----------------------------------------------------------------------
-# RSS Connector – with timeout and error handling
-# ----------------------------------------------------------------------
-def fetch_rss(source: Dict[str, Any]) -> List[Document]:
-    """Fetch and parse an RSS feed."""
-    url = source["url"]
+    url = feed_config["url"]
     try:
         feed = feedparser.parse(url)
-        if feed.bozo:
-            logger.warning(f"RSS feed may have issues: {feed.bozo_exception}")
+        docs = []
+        for entry in feed.entries:
+            content = entry.get("summary", entry.get("description", ""))
+            if content:
+                doc = Document(
+                    page_content=content,
+                    metadata={"source": url, "title": entry.get("title"), "published": entry.get("published")}
+                )
+                docs.append(doc)
+        logger.info(f"Fetched {len(docs)} items from RSS {url}")
+        return docs
     except Exception as e:
-        logger.exception(f"Failed to fetch RSS feed {url}")
+        logger.error(f"RSS fetch failed for {url}: {e}")
         return []
 
-    template = source.get("content_template", "{title}\n{link}\n{summary}")
-    documents = []
-    for entry in feed.entries[:50]:  # limit to last 50 entries
-        try:
-            fields = {
-                "title": entry.get("title", ""),
-                "link": entry.get("link", ""),
-                "summary": entry.get("summary", ""),
-                "published": entry.get("published", ""),
-            }
-            content = template.format(**fields)
-            doc = Document(
-                page_content=content,
-                metadata={
-                    "source": url,
-                    "source_name": source.get("name", "RSS"),
-                    "published": fields["published"],
-                    "fetched_at": datetime.now().isoformat()
-                }
-            )
-            documents.append(doc)
-        except Exception as e:
-            logger.warning(f"Skipping RSS entry: {e}")
-            continue
+def fetch_api(api_config: Dict[str, Any]) -> List[Document]:
+    """Fetch data from a REST API (expects JSON array)."""
+    if not api_config.get("enabled", False):
+        return []
+    url = api_config["url"]
+    try:
+        resp = requests.get(url, timeout=10)
+        resp.raise_for_status()
+        data = resp.json()
+        docs = []
+        if isinstance(data, list):
+            for item in data:
+                # Convert item to string (you might want custom parsing)
+                content = str(item)
+                doc = Document(page_content=content, metadata={"source": url})
+                docs.append(doc)
+        logger.info(f"Fetched {len(docs)} items from API {url}")
+        return docs
+    except Exception as e:
+        logger.error(f"API fetch failed for {url}: {e}")
+        return []
 
-    logger.info(f"Fetched {len(documents)} entries from RSS {source.get('name')}")
-    return documents
+def fetch_all_sources() -> List[Document]:
+    """Fetch documents from all enabled sources."""
+    all_docs = []
 
+    # Main CSV
+    all_docs.extend(fetch_csv(DATASET_PATH))
 
-# ----------------------------------------------------------------------
-# API Connector – with retries and JSON parsing
-# ----------------------------------------------------------------------
-def fetch_api(source: Dict[str, Any]) -> List[Document]:
-    """Fetch data from a REST API. Supports simple date substitution."""
-    url_template = source["url"]
-    # Replace {{date}} with today's date in YYYY/MM/DD format
-    today = datetime.now().strftime("%Y/%m/%d")
-    url = url_template.replace("{{date}}", today)
+    # Uploads
+    all_docs.extend(fetch_uploads())
 
-    # Retry logic
-    max_retries = 3
-    timeout = 10
-    for attempt in range(max_retries):
-        try:
-            resp = requests.get(url, timeout=timeout)
-            resp.raise_for_status()
-            data = resp.json()
-            break
-        except requests.exceptions.RequestException as e:
-            logger.warning(f"API request failed (attempt {attempt+1}): {e}")
-            if attempt == max_retries - 1:
-                logger.error(f"All {max_retries} attempts failed for {url}")
-                return []
-            time.sleep(2 ** attempt)  # exponential backoff
+    # RSS feeds
+    for feed in SOURCES.get("rss", []):
+        all_docs.extend(fetch_rss(feed))
 
-    # Generic parser – adapt to your actual API response structure
-    # Example: Wikipedia featured content
-    items = []
-    if "tfa" in data:  # Today's featured article
-        items.append(data["tfa"])
-    if "news" in data:  # In the news
-        items.extend(data.get("news", []))
-    if "onthisday" in data:  # On this day
-        items.extend(data.get("onthisday", []))
+    # APIs
+    for api in SOURCES.get("api", []):
+        all_docs.extend(fetch_api(api))
 
-    # If no known structure, try to extract a list from the top level
-    if not items and isinstance(data, list):
-        items = data
-    elif not items and isinstance(data, dict):
-        # Try common keys that might contain lists
-        for key in ['items', 'results', 'data', 'articles']:
-            if key in data and isinstance(data[key], list):
-                items = data[key]
-                break
-
-    template = source.get("content_template", "{title}\n{extract}")
-    documents = []
-    for item in items:
-        try:
-            fields = {
-                "title": item.get("title", ""),
-                "extract": item.get("extract", item.get("description", item.get("content", ""))),
-                "url": item.get("url", item.get("link", "")),
-            }
-            content = template.format(**fields)
-            doc = Document(
-                page_content=content,
-                metadata={
-                    "source": url,
-                    "source_name": source.get("name", "API"),
-                    "fetched_at": datetime.now().isoformat()
-                }
-            )
-            documents.append(doc)
-        except Exception as e:
-            logger.warning(f"Skipping API item: {e}")
-            continue
-
-    logger.info(f"Fetched {len(documents)} items from API {source.get('name')}")
-    return documents
+    return all_docs

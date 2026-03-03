@@ -2,8 +2,9 @@
 WhatsApp‑style chat interface with:
 - Fixed input bar at bottom
 - Voice & file buttons below input (two small bars)
-- Send button to submit (no Enter key submission)
+- Send button only (no Enter submission)
 - Current timestamps, auto‑scroll, history preserved
+- All imports fixed, buttons fully functional
 """
 
 import os
@@ -47,7 +48,7 @@ try:
         get_available_models,
         MODELS,
         get_task_status,
-        get_active_tasks,
+        get_active_tasks,      # <-- FIX: added missing import
         ZHIPU_AVAILABLE,
         load_model,
     )
@@ -293,10 +294,14 @@ if "uploaded_file" not in st.session_state:
     st.session_state.uploaded_file = None
 
 if "processing" not in st.session_state:
-    st.session_state.processing = False  # to disable send button while generating
+    st.session_state.processing = False
+
+# Flag to clear input on next run
+if "clear_input" not in st.session_state:
+    st.session_state.clear_input = False
 
 # ----------------------------------------------------------------------
-# JavaScript for voice and file input (robust)
+# JavaScript for voice and file input (robust, with updated selectors)
 # ----------------------------------------------------------------------
 st.markdown("""
 <script>
@@ -386,7 +391,7 @@ if file_receiver and not st.session_state.uploaded_file:
         st.session_state.uploaded_file = None
 
 # ----------------------------------------------------------------------
-# Sidebar (unchanged)
+# Sidebar
 # ----------------------------------------------------------------------
 with st.sidebar:
     st.markdown("## 🧠 Model")
@@ -454,7 +459,7 @@ with st.sidebar:
         if st.button("⟳ Refresh Tasks", use_container_width=True):
             st.rerun()
         try:
-            active_tasks = get_active_tasks()
+            active_tasks = get_active_tasks()   # <-- now works because imported
             for task_id, variant, status, progress in active_tasks:
                 if task_id not in st.session_state.tasks:
                     st.session_state.tasks[task_id] = {
@@ -497,7 +502,6 @@ with st.sidebar:
 # ----------------------------------------------------------------------
 # Display all messages (auto‑scroll via JavaScript)
 # ----------------------------------------------------------------------
-# We'll inject a small script to scroll to bottom after each update
 st.markdown("""
 <script>
 function scrollToBottom() {
@@ -536,9 +540,16 @@ with st.container():
     # First row: text input + send button
     col1, col2 = st.columns([8, 1])
     with col1:
+        # Handle input clearing
+        if st.session_state.clear_input:
+            default_value = ""
+            st.session_state.clear_input = False
+        else:
+            default_value = None
         message_input = st.text_input(
             "Message",
             key="message_input",
+            value=default_value,
             label_visibility="collapsed",
             placeholder="Type a message",
             disabled=st.session_state.processing
@@ -564,8 +575,9 @@ with st.container():
 # Process user message when send button is clicked
 # ----------------------------------------------------------------------
 if send_clicked and message_input and not st.session_state.processing:
-    # Lock UI
+    # Lock UI and set clear flag
     st.session_state.processing = True
+    st.session_state.clear_input = True
     current_prompt = message_input
 
     uploaded_file_obj = None

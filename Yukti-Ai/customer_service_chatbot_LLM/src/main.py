@@ -2,6 +2,7 @@
 Main Streamlit application for Yukti AI.
 Includes hardcoded admin credentials (admin1234/admin1234) and a full admin dashboard.
 All tabs now display real-time data with comprehensive metrics and insights.
+Knowledge base updates automatically via background thread when changes are detected.
 """
 
 import os
@@ -9,6 +10,7 @@ import sys
 import time
 import logging
 import sqlite3
+import threading
 from pathlib import Path
 from datetime import datetime, timedelta
 from typing import Dict, Any, Optional, List, Tuple
@@ -25,7 +27,7 @@ PROJECT_ROOT = Path(__file__).parent.parent.absolute()
 if str(PROJECT_ROOT) not in sys.path:
     sys.path.insert(0, str(PROJECT_ROOT))
 
-# Local imports (adjust as needed)
+# Local imports
 try:
     from config import (
         BASE_DIR,
@@ -37,7 +39,6 @@ try:
         GOOGLE_API_KEY,
     )
 except ImportError:
-    # Fallback if config not available
     BASE_DIR = PROJECT_ROOT
     VECTORDB_PATH = BASE_DIR / "faiss_index"
     DB_PATH = BASE_DIR / "yukti_tasks.db"
@@ -54,7 +55,6 @@ try:
         check_kb_status,
     )
 except ImportError:
-    # Stubs for missing module
     def create_vector_db(): return False
     def get_kb_detailed_status(): return {"ready": False, "error": "Not implemented"}
     def get_document_count(): return None
@@ -89,7 +89,7 @@ try:
 except ImportError:
     def detect_language(text): return {"language": "en", "method": "fallback", "explicit_instruction": None}
 
-# Import UI helpers (with fallbacks)
+# Import UI helpers
 try:
     from ui_helpers import render_task, show_error_toast, show_success_toast, confirm_dialog, metric_card, log_viewer
 except ImportError:
@@ -99,6 +99,15 @@ except ImportError:
     def confirm_dialog(title, msg): return st.checkbox(msg)
     def metric_card(label, value, delta=None): st.metric(label, value, delta)
     def log_viewer(path, max_lines): st.info("Log viewer not available")
+
+# Import knowledge updater components
+try:
+    from knowledge_updater.builder import rebuild_index
+    from knowledge_updater.config import UPLOADS_PATH, SOURCES as KB_SOURCES
+    KB_UPDATER_AVAILABLE = True
+except ImportError:
+    KB_UPDATER_AVAILABLE = False
+    def rebuild_index(): return False
 
 # Configure logging
 logging.basicConfig(level=logging.INFO, format='%(asctime)s - %(name)s - %(levelname)s - %(message)s')
@@ -118,7 +127,6 @@ def init_db():
         conn = sqlite3.connect(str(DB_PATH))
         c = conn.cursor()
 
-        # Users
         c.execute('''CREATE TABLE IF NOT EXISTS users (
             id INTEGER PRIMARY KEY AUTOINCREMENT,
             username TEXT UNIQUE NOT NULL,
@@ -127,7 +135,6 @@ def init_db():
             created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
         )''')
 
-        # User activity
         c.execute('''CREATE TABLE IF NOT EXISTS user_activity (
             id INTEGER PRIMARY KEY AUTOINCREMENT,
             user_id INTEGER,
@@ -140,7 +147,6 @@ def init_db():
             FOREIGN KEY(user_id) REFERENCES users(id)
         )''')
 
-        # Model metrics (optional)
         c.execute('''CREATE TABLE IF NOT EXISTS model_metrics (
             id INTEGER PRIMARY KEY AUTOINCREMENT,
             model_key TEXT,
@@ -152,7 +158,6 @@ def init_db():
             UNIQUE(model_key, period, period_start)
         )''')
 
-        # System metrics
         c.execute('''CREATE TABLE IF NOT EXISTS system_metrics (
             id INTEGER PRIMARY KEY AUTOINCREMENT,
             cpu REAL,
@@ -161,7 +166,6 @@ def init_db():
             timestamp TIMESTAMP DEFAULT CURRENT_TIMESTAMP
         )''')
 
-        # Knowledge base metrics
         c.execute('''CREATE TABLE IF NOT EXISTS kb_metrics (
             id INTEGER PRIMARY KEY AUTOINCREMENT,
             doc_count INTEGER,
@@ -169,7 +173,6 @@ def init_db():
             timestamp TIMESTAMP DEFAULT CURRENT_TIMESTAMP
         )''')
 
-        # Admin actions log
         c.execute('''CREATE TABLE IF NOT EXISTS admin_actions (
             id INTEGER PRIMARY KEY AUTOINCREMENT,
             admin_id INTEGER,
@@ -179,7 +182,6 @@ def init_db():
             FOREIGN KEY(admin_id) REFERENCES users(id)
         )''')
 
-        # Tasks table (for async video) – ensure user_id exists
         c.execute('''CREATE TABLE IF NOT EXISTS tasks (
             task_id TEXT PRIMARY KEY,
             variant TEXT,
@@ -395,20 +397,15 @@ def get_user_message_counts():
         conn.close()
 
         if not df.empty:
-            # Ensure numeric columns are truly numeric
             numeric_cols = ['total_messages', 'successful', 'failed', 'avg_response_time',
                             'images_created', 'videos_created', 'audio_created']
             for col in numeric_cols:
                 df[col] = pd.to_numeric(df[col], errors='coerce').fillna(0)
 
-            # Compute success rate (as float, not string yet)
             df['success_rate'] = (df['successful'] / df['total_messages'].replace(0, 1)) * 100
 
-            # Convert timestamps to datetime then to strings for display
             df['created_at'] = pd.to_datetime(df['created_at']).dt.strftime('%Y-%m-%d %H:%M')
             df['last_active'] = pd.to_datetime(df['last_active']).dt.strftime('%Y-%m-%d %H:%M')
-
-            # Format avg_response_time as integer
             df['avg_response_time'] = df['avg_response_time'].round(0).astype(int)
         else:
             df = pd.DataFrame(columns=[
@@ -595,6 +592,78 @@ def get_database_stats():
     return stats
 
 # ----------------------------------------------------------------------
+# Background knowledge base updater thread
+# ----------------------------------------------------------------------
+class KnowledgeBaseUpdater(threading.Thread):
+    """Background thread that checks for changes and rebuilds index if needed."""
+    def __init__(self, check_interval=2):
+        super().__init__(daemon=True)
+        self.check_interval = check_interval
+        self.last_rebuild_time = 0
+        self.last_known_mtimes = {}  # file -> mtime
+        self.running = True
+
+    def run(self):
+        logger.info("Knowledge base auto-updater started.")
+        while self.running:
+            try:
+                self._check_and_rebuild()
+            except Exception as e:
+                logger.exception("Error in KB updater thread")
+            time.sleep(self.check_interval)
+
+    def _check_and_rebuild(self):
+        """Check if any source file has changed; if so, rebuild."""
+        # Check dataset.csv
+        dataset_path = PROJECT_ROOT / "dataset" / "dataset.csv"
+        if dataset_path.exists():
+            mtime = dataset_path.stat().st_mtime
+            if dataset_path not in self.last_known_mtimes or self.last_known_mtimes[dataset_path] != mtime:
+                logger.info(f"Change detected in {dataset_path}. Scheduling rebuild.")
+                self._trigger_rebuild()
+                self.last_known_mtimes[dataset_path] = mtime
+                return
+
+        # Check uploads directory
+        if UPLOADS_PATH.exists():
+            for file_path in UPLOADS_PATH.glob("*"):
+                if file_path.is_file():
+                    mtime = file_path.stat().st_mtime
+                    if file_path not in self.last_known_mtimes or self.last_known_mtimes[file_path] != mtime:
+                        logger.info(f"Change detected in {file_path}. Scheduling rebuild.")
+                        self._trigger_rebuild()
+                        self.last_known_mtimes[file_path] = mtime
+                        return
+
+        # Optionally check RSS/API sources (we can't easily detect changes, so skip)
+
+    def _trigger_rebuild(self):
+        """Rebuild index if at least 60 seconds passed since last rebuild."""
+        now = time.time()
+        if now - self.last_rebuild_time < 60:
+            logger.info("Skipping rebuild – last rebuild too recent.")
+            return
+        logger.info("Auto-rebuilding knowledge base...")
+        if rebuild_index():
+            self.last_rebuild_time = now
+            # Update session state status
+            if 'kb_status' in st.session_state:
+                st.session_state.kb_status = get_kb_detailed_status()
+            # Record metrics
+            record_kb_metrics()
+            logger.info("Auto-rebuild completed.")
+        else:
+            logger.error("Auto-rebuild failed.")
+
+    def stop(self):
+        self.running = False
+
+# Start background updater if not already running
+if 'kb_updater' not in st.session_state:
+    st.session_state.kb_updater = KnowledgeBaseUpdater(check_interval=2)
+    st.session_state.kb_updater.start()
+
+# ----------------------------------------------------------------------
 # Session state initialization
 # ----------------------------------------------------------------------
 if "logged_in" not in st.session_state:
@@ -661,6 +730,9 @@ if not st.session_state.logged_in:
 with st.sidebar:
     st.markdown(f"### 👤 {st.session_state.username}")
     if st.button("🚪 Logout", use_container_width=True):
+        # Stop background updater before logout
+        if 'kb_updater' in st.session_state:
+            st.session_state.kb_updater.stop()
         for key in list(st.session_state.keys()):
             if key in ["logged_in", "user_id", "username", "is_admin", "admin_mode", "messages", "tasks", "debug_mode"]:
                 del st.session_state[key]
@@ -672,13 +744,11 @@ with st.sidebar:
             st.session_state.admin_mode = admin_mode
             st.rerun()
 
-        # Debug mode toggle
         debug_mode = st.checkbox("🔧 Debug Mode", value=st.session_state.get("debug_mode", False))
         if debug_mode != st.session_state.debug_mode:
             st.session_state.debug_mode = debug_mode
             st.rerun()
 
-        # Auto-refresh toggle
         auto_refresh = st.checkbox("🔄 Auto-refresh (every 10s)", value=st.session_state.get("auto_refresh", False))
         if auto_refresh != st.session_state.auto_refresh:
             st.session_state.auto_refresh = auto_refresh
@@ -710,9 +780,9 @@ with st.sidebar:
         st.markdown("❌ **Not Ready**")
         if kb_status["error"]:
             st.caption(f"Error: {kb_status['error']}")
-    if st.button("🔄 Update KB", use_container_width=True):
+    if st.button("🔄 Update KB (Manual)", use_container_width=True):
         with st.spinner("Rebuilding..."):
-            if create_vector_db():
+            if rebuild_index():
                 st.session_state.kb_status = get_kb_detailed_status()
                 st.success("Knowledge base updated")
                 st.rerun()
@@ -770,7 +840,7 @@ if st.session_state.admin_mode:
 
     tabs = st.tabs(["📊 Overview", "👥 Users", "📈 Analytics", "📚 Knowledge Base", "📋 Tasks", "🤖 Insights", "⚙️ System"])
 
-    # ----- Overview Tab (with auto-refresh) -----
+    # ----- Overview Tab -----
     with tabs[0]:
         st.subheader("System Status")
         col1, col2, col3, col4 = st.columns(4)
@@ -794,11 +864,10 @@ if st.session_state.admin_mode:
         cols[1].metric("Memory", f"{sys_metrics['memory']:.1f}%")
         cols[2].metric("Disk", f"{sys_metrics['disk']:.1f}%")
 
-    # ----- Users Tab (with media columns) -----
+    # ----- Users Tab -----
     with tabs[1]:
         st.subheader("User Management")
 
-        # Add new user form
         with st.expander("➕ Add New User", expanded=False):
             with st.form("add_user_form"):
                 col1, col2 = st.columns(2)
@@ -827,7 +896,6 @@ if st.session_state.admin_mode:
         if users_df.empty:
             st.info("👥 No users found. Create one using the form above.")
         else:
-            # Build display columns
             available_cols = users_df.columns.tolist()
             display_columns = ['username', 'is_admin', 'created_at', 'total_messages']
             optional_cols = ['success_rate', 'avg_response_time', 'last_active', 'most_used_model',
@@ -837,10 +905,8 @@ if st.session_state.admin_mode:
                     display_columns.append(col)
 
             display_df = users_df[display_columns].copy()
-            # Format success_rate as percentage string
             if 'success_rate' in display_df.columns:
                 display_df['success_rate'] = display_df['success_rate'].round(1).astype(str) + '%'
-            # Rename for display
             rename_map = {
                 'username': 'Username',
                 'is_admin': 'Admin',
@@ -857,12 +923,10 @@ if st.session_state.admin_mode:
             display_df = display_df.rename(columns={k: v for k, v in rename_map.items() if k in display_df.columns})
             st.dataframe(display_df, use_container_width=True)
 
-            # Debug raw data
             if st.session_state.debug_mode:
                 with st.expander("🔍 Raw User Data (Debug)"):
                     st.dataframe(users_df)
 
-            # Edit/Delete per user (unchanged)
             st.markdown("### ✏️ Edit / Delete Users")
             for _, row in users_df.iterrows():
                 if row['username'] == st.session_state.username:
@@ -892,11 +956,9 @@ if st.session_state.admin_mode:
                             else:
                                 st.error(msg)
 
-    # ----- Analytics Tab (with comprehensive metrics and charts) -----
+    # ----- Analytics Tab -----
     with tabs[2]:
         st.subheader("Essential Performance Metrics")
-
-        # Compute aggregates
         conn = sqlite3.connect(str(DB_PATH))
         total_queries = pd.read_sql_query("SELECT COUNT(*) as cnt FROM user_activity", conn)['cnt'][0]
         total_errors = pd.read_sql_query("SELECT COUNT(*) as cnt FROM user_activity WHERE success=0", conn)['cnt'][0]
@@ -909,19 +971,16 @@ if st.session_state.admin_mode:
         col1.metric("Avg Latency (ms)", f"{avg_latency:.0f}")
         col2.metric("Resolution Rate", f"{resolution_rate:.1f}%")
         col3.metric("Fallback Rate", f"{fallback_rate:.1f}%")
-        col4.metric("Task Completion (Video)", "N/A")  # Placeholder
+        col4.metric("Task Completion (Video)", "N/A")
 
         st.subheader("Model Performance Over Time")
         perf = get_model_performance(30)
         if perf.empty:
             st.info("No model performance data yet.")
         else:
-            # Latency chart
             fig1 = px.line(perf, x="day", y="avg_response", color="model_key",
                            title="Average Response Time (ms) per Model")
             st.plotly_chart(fig1, use_container_width=True)
-
-            # Error rate chart
             perf['error_rate'] = perf['errors'] / perf['requests'] * 100
             fig2 = px.line(perf, x="day", y="error_rate", color="model_key",
                            title="Error Rate (%) per Model")
@@ -946,18 +1005,17 @@ if st.session_state.admin_mode:
                            title="System Resources (24h)")
             st.plotly_chart(fig5, use_container_width=True)
 
-        # Radar chart (dummy – needs multi‑dimensional data)
         st.subheader("Model Quality Radar")
         st.caption("(Placeholder – requires faithfulness, toxicity, etc.)")
         categories = ['Intelligence', 'Coherence', 'Relevance', 'Fluency']
-        values = [85, 90, 88, 92]  # Dummy
+        values = [85, 90, 88, 92]
         fig6 = go.Figure(data=go.Scatterpolar(r=values, theta=categories, fill='toself'))
         fig6.update_layout(polar=dict(radialaxis=dict(visible=True, range=[0,100])))
         st.plotly_chart(fig6, use_container_width=True)
 
-    # ----- Knowledge Base Tab (unchanged) -----
+    # ----- Knowledge Base Tab -----
     with tabs[3]:
-        st.subheader("Knowledge Base")
+        st.subheader("Knowledge Base Management")
         col1, col2 = st.columns(2)
         with col1:
             st.metric("Documents", get_document_count() or 0)
@@ -967,6 +1025,7 @@ if st.session_state.admin_mode:
                 st.metric("Index Size", f"{size:.2f} MB")
             else:
                 st.metric("Index Size", "N/A")
+
         kb_hist = get_kb_history(30)
         if kb_hist.empty:
             st.info("📚 No knowledge base history yet. It will appear after the first rebuild.")
@@ -974,19 +1033,77 @@ if st.session_state.admin_mode:
             if 'time' in kb_hist.columns and 'doc_count' in kb_hist.columns:
                 fig = px.line(kb_hist, x="time", y="doc_count", title="Document Count Over Time")
                 st.plotly_chart(fig, use_container_width=True)
-        if st.button("🔄 Rebuild Now"):
-            if st.checkbox("Confirm rebuild"):
-                with st.spinner("Rebuilding..."):
-                    if create_vector_db():
-                        st.session_state.kb_status = get_kb_detailed_status()
-                        record_kb_metrics()
-                        log_admin_action(st.session_state.user_id, "REBUILD_KB")
-                        st.success("Rebuilt")
-                        st.rerun()
-                    else:
-                        st.error("Rebuild failed")
 
-    # ----- Tasks Tab (unchanged) -----
+        st.markdown("### ⚙️ Auto‑Update Status")
+        st.success("✅ Auto‑update is running in background (checks every 2 seconds, rebuilds if changes detected).")
+        if st.button("🔄 Force Rebuild Now"):
+            with st.spinner("Rebuilding..."):
+                if rebuild_index():
+                    st.session_state.kb_status = get_kb_detailed_status()
+                    record_kb_metrics()
+                    log_admin_action(st.session_state.user_id, "REBUILD_KB", "Manual force")
+                    st.success("Rebuilt successfully!")
+                    st.rerun()
+                else:
+                    st.error("Rebuild failed – check logs.")
+
+        with st.expander("📤 Upload Files", expanded=False):
+            st.markdown("Upload CSV, TXT, or PDF files to add to the knowledge base. Changes will be picked up automatically.")
+            uploaded_files = st.file_uploader(
+                "Choose files",
+                type=["csv", "txt", "pdf"],
+                accept_multiple_files=True,
+                key="kb_upload"
+            )
+            if uploaded_files and st.button("Upload Files"):
+                for uploaded_file in uploaded_files:
+                    file_path = UPLOADS_PATH / uploaded_file.name
+                    with open(file_path, "wb") as f:
+                        f.write(uploaded_file.getbuffer())
+                    st.success(f"Saved {uploaded_file.name}")
+                st.info("Auto‑update will detect changes within 2 seconds and rebuild.")
+
+        with st.expander("🌐 Web Sources", expanded=False):
+            st.markdown("Configure RSS feeds and APIs (auto‑update not yet implemented for web sources).")
+            # Simplified configuration – for production, persist to JSON.
+            if "web_sources_config" not in st.session_state:
+                st.session_state.web_sources_config = KB_SOURCES.copy()
+            config = st.session_state.web_sources_config
+            st.subheader("RSS Feeds")
+            for i, feed in enumerate(config.get("rss", [])):
+                cols = st.columns([3, 1, 1])
+                with cols[0]:
+                    feed["name"] = st.text_input(f"Name", value=feed["name"], key=f"rss_name_{i}")
+                    feed["url"] = st.text_input(f"URL", value=feed["url"], key=f"rss_url_{i}")
+                with cols[1]:
+                    feed["enabled"] = st.checkbox("Enabled", value=feed.get("enabled", True), key=f"rss_enabled_{i}")
+                with cols[2]:
+                    if st.button("Remove", key=f"rss_remove_{i}"):
+                        config["rss"].pop(i)
+                        st.rerun()
+            if st.button("➕ Add RSS Feed"):
+                config["rss"].append({"name": "", "url": "", "enabled": True})
+                st.rerun()
+            st.subheader("APIs")
+            for i, api in enumerate(config.get("api", [])):
+                cols = st.columns([3, 1, 1])
+                with cols[0]:
+                    api["name"] = st.text_input(f"Name", value=api["name"], key=f"api_name_{i}")
+                    api["url"] = st.text_input(f"URL", value=api["url"], key=f"api_url_{i}")
+                with cols[1]:
+                    api["enabled"] = st.checkbox("Enabled", value=api.get("enabled", True), key=f"api_enabled_{i}")
+                with cols[2]:
+                    if st.button("Remove", key=f"api_remove_{i}"):
+                        config["api"].pop(i)
+                        st.rerun()
+            if st.button("➕ Add API"):
+                config["api"].append({"name": "", "url": "", "enabled": True})
+                st.rerun()
+            if st.button("💾 Save Web Sources (to memory)"):
+                st.success("Configuration saved (in memory). For persistence, implement JSON storage.")
+                st.rerun()
+
+    # ----- Tasks Tab -----
     with tabs[4]:
         st.subheader("Active Tasks")
         active = get_active_tasks(st.session_state.user_id)
@@ -1009,31 +1126,22 @@ if st.session_state.admin_mode:
         else:
             st.dataframe(hist, use_container_width=True)
 
-    # ----- Insights Tab (AI‑powered recommendations) -----
+    # ----- Insights Tab -----
     with tabs[5]:
         st.subheader("AI‑Powered Insights")
-
-        # Compute insights from real data
         conn = sqlite3.connect(str(DB_PATH))
-        # Model performance
         model_err = pd.read_sql_query("""
             SELECT model_key, COUNT(*) as total, SUM(CASE WHEN success=0 THEN 1 ELSE 0 END) as errors
             FROM user_activity
             WHERE timestamp >= datetime('now', '-7 days')
             GROUP BY model_key
         """, conn)
-        # User growth
         user_growth = pd.read_sql_query("""
             SELECT DATE(created_at) as day, COUNT(*) as new_users
             FROM users
             WHERE created_at >= datetime('now', '-30 days')
             GROUP BY day
         """, conn)
-        # KB age
-        kb_age = None
-        if VECTORDB_PATH.exists():
-            mtime = datetime.fromtimestamp(VECTORDB_PATH.stat().st_mtime)
-            kb_age = (datetime.now() - mtime).days
         conn.close()
 
         col1, col2 = st.columns(2)
@@ -1041,7 +1149,7 @@ if st.session_state.admin_mode:
             st.markdown("#### 📈 Model Health")
             if not model_err.empty:
                 for _, row in model_err.iterrows():
-                    err_rate = row['errors'] / row['total'] * 100
+                    err_rate = row['errors'] / row['total'] * 100 if row['total'] > 0 else 0
                     if err_rate > 10:
                         st.warning(f"⚠️ {row['model_key']} error rate: {err_rate:.1f}%")
                     else:
@@ -1061,7 +1169,9 @@ if st.session_state.admin_mode:
                 st.info("No new users.")
 
         st.markdown("#### 🧠 Knowledge Base")
-        if kb_age is not None:
+        if VECTORDB_PATH.exists():
+            mtime = datetime.fromtimestamp(VECTORDB_PATH.stat().st_mtime)
+            kb_age = (datetime.now() - mtime).days
             if kb_age > 7:
                 st.warning(f"KB is {kb_age} days old. Consider rebuilding.")
             else:
@@ -1083,10 +1193,8 @@ if st.session_state.admin_mode:
         for r in recs:
             st.write(r)
 
-        # Advanced forecasting (dummy)
         st.markdown("#### 🔮 Forecast (Next 7 Days)")
         st.caption("Based on recent activity trends")
-        # Simple linear forecast using last 14 days
         act = get_user_activity_summary(14)
         if not act.empty and len(act) > 7:
             avg_queries = act['total_queries'].tail(7).mean()
@@ -1094,7 +1202,7 @@ if st.session_state.admin_mode:
         else:
             st.info("Insufficient data for forecast.")
 
-    # ----- System Tab (unchanged) -----
+    # ----- System Tab -----
     with tabs[6]:
         st.subheader("System Control")
         if st.button("📥 Export Analytics"):
@@ -1118,7 +1226,7 @@ if st.session_state.admin_mode:
     st.stop()
 
 else:
-    # -------------------- Chat Interface (unchanged) --------------------
+    # -------------------- Chat Interface --------------------
     for msg in st.session_state.messages:
         with st.chat_message(msg["role"]):
             st.markdown(msg["content"])

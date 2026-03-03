@@ -1,6 +1,8 @@
 """
 Main Streamlit application for Yukti AI.
 Includes hardcoded admin credentials (admin1234/admin1234) and a full admin dashboard.
+All tabs now reliably display data (or informative empty states) thanks to robust error handling
+and defensive coding.
 """
 
 import os
@@ -88,10 +90,10 @@ try:
 except ImportError:
     def detect_language(text): return {"language": "en", "method": "fallback", "explicit_instruction": None}
 
+# Import UI helpers (with fallbacks)
 try:
     from ui_helpers import render_task, show_error_toast, show_success_toast, confirm_dialog, metric_card, log_viewer
 except ImportError:
-    # Fallbacks
     def render_task(*args): pass
     def show_error_toast(msg): st.error(msg)
     def show_success_toast(msg): st.success(msg)
@@ -139,7 +141,7 @@ def init_db():
             FOREIGN KEY(user_id) REFERENCES users(id)
         )''')
 
-        # Model metrics
+        # Model metrics (optional)
         c.execute('''CREATE TABLE IF NOT EXISTS model_metrics (
             id INTEGER PRIMARY KEY AUTOINCREMENT,
             model_key TEXT,
@@ -345,7 +347,7 @@ def record_kb_metrics():
         logger.error(f"Failed to record KB metrics: {e}")
 
 # ----------------------------------------------------------------------
-# Admin data functions (enhanced)
+# Admin data functions (enhanced with error handling & column safety)
 # ----------------------------------------------------------------------
 def get_all_users():
     try:
@@ -387,15 +389,20 @@ def get_user_message_counts():
         df = pd.read_sql_query(query, conn)
         conn.close()
 
+        # Add derived columns safely
         if not df.empty:
-            # Add derived columns
+            # Convert created_at and last_active to datetime for formatting
+            df['created_at'] = pd.to_datetime(df['created_at'])
+            df['last_active'] = pd.to_datetime(df['last_active'])
+            df['created_at'] = df['created_at'].dt.strftime('%Y-%m-%d %H:%M')
+            df['last_active'] = df['last_active'].dt.strftime('%Y-%m-%d %H:%M')
+            # Success rate
             df['success_rate'] = (df['successful'] / df['total_messages'].replace(0, 1)) * 100
             df['success_rate'] = df['success_rate'].round(1).astype(str) + '%'
+            # Avg response time
             df['avg_response_time'] = df['avg_response_time'].round(0).fillna(0).astype(int)
-            df['created_at'] = pd.to_datetime(df['created_at']).dt.strftime('%Y-%m-%d %H:%M')
-            df['last_active'] = pd.to_datetime(df['last_active']).dt.strftime('%Y-%m-%d %H:%M')
         else:
-            # Return empty DataFrame with all expected columns
+            # Empty dataframe with expected columns
             df = pd.DataFrame(columns=[
                 'id', 'username', 'is_admin', 'created_at', 'total_messages',
                 'successful', 'failed', 'avg_response_time', 'last_active',
@@ -404,7 +411,8 @@ def get_user_message_counts():
         return df
     except Exception as e:
         logger.exception("get_user_message_counts failed")
-        # Show error in debug mode (handled by caller)
+        if st.session_state.get('debug_mode', False):
+            st.error(f"🔴 Error in get_user_message_counts: {e}")
         return pd.DataFrame(columns=[
             'id', 'username', 'is_admin', 'created_at', 'total_messages',
             'successful', 'failed', 'avg_response_time', 'last_active',
@@ -566,7 +574,7 @@ def get_database_stats():
     return stats
 
 # ----------------------------------------------------------------------
-# Session state
+# Session state initialization
 # ----------------------------------------------------------------------
 if "logged_in" not in st.session_state:
     st.session_state.logged_in = False
@@ -582,6 +590,7 @@ if "logged_in" not in st.session_state:
     st.session_state.processing = False
     st.session_state.uploaded_file = None
     st.session_state.last_metrics_record = 0  # for periodic recording
+    st.session_state.debug_mode = False       # global debug flag
 
 # ----------------------------------------------------------------------
 # Login / Signup UI
@@ -631,7 +640,7 @@ with st.sidebar:
     st.markdown(f"### 👤 {st.session_state.username}")
     if st.button("🚪 Logout", use_container_width=True):
         for key in list(st.session_state.keys()):
-            if key in ["logged_in", "user_id", "username", "is_admin", "admin_mode", "messages", "tasks"]:
+            if key in ["logged_in", "user_id", "username", "is_admin", "admin_mode", "messages", "tasks", "debug_mode"]:
                 del st.session_state[key]
         st.rerun()
 
@@ -642,7 +651,10 @@ with st.sidebar:
             st.rerun()
 
         # Debug mode toggle (only for admins)
-        st.session_state.debug_mode = st.checkbox("🔧 Debug Mode", value=st.session_state.get("debug_mode", False))
+        debug_mode = st.checkbox("🔧 Debug Mode", value=st.session_state.get("debug_mode", False))
+        if debug_mode != st.session_state.debug_mode:
+            st.session_state.debug_mode = debug_mode
+            st.rerun()
 
     st.markdown("## 🧠 Model")
     model_options = get_available_models() or ["Yukti‑Flash"]
@@ -692,7 +704,8 @@ with st.sidebar:
                 else:
                     st.session_state.tasks[task_id].update({"status": status, "progress": progress})
         except Exception as e:
-            st.warning(f"Could not fetch tasks: {e}")
+            if st.session_state.debug_mode:
+                st.error(f"Task fetch error: {e}")
         for task_id, info in st.session_state.tasks.items():
             render_task(task_id, info)
         st.divider()
@@ -710,14 +723,15 @@ if st.session_state.admin_mode:
     st.title("🛡️ Admin Dashboard")
     st.caption(f"Logged in as {st.session_state.username} (Admin)")
 
-    # Record metrics periodically
+    # Record metrics periodically (once per minute)
     now = time.time()
-    if now - st.session_state.last_metrics_record > 60:  # every minute
+    if now - st.session_state.last_metrics_record > 60:
         record_system_metrics()
         record_kb_metrics()
         st.session_state.last_metrics_record = now
 
-    with st.expander("🔍 Database Diagnostics"):
+    # Database diagnostics expander
+    with st.expander("🔍 Database Diagnostics", expanded=False):
         stats = get_database_stats()
         cols = st.columns(5)
         cols[0].metric("Users", stats.get("users", 0))
@@ -728,6 +742,7 @@ if st.session_state.admin_mode:
 
     tabs = st.tabs(["📊 Overview", "👥 Users", "📈 Analytics", "📚 Knowledge Base", "📋 Tasks", "🤖 Insights", "⚙️ System"])
 
+    # ----- Overview Tab -----
     with tabs[0]:
         st.subheader("System Status")
         col1, col2, col3, col4 = st.columns(4)
@@ -744,17 +759,17 @@ if st.session_state.admin_mode:
             else:
                 st.metric("Last KB Update", "Never")
 
-        placeholder = st.empty()
-        while st.session_state.admin_mode:
-            with placeholder.container():
-                sys = get_system_metrics()
-                cols = st.columns(3)
-                cols[0].metric("CPU", f"{sys['cpu']:.1f}%")
-                cols[1].metric("Memory", f"{sys['memory']:.1f}%")
-                cols[2].metric("Disk", f"{sys['disk']:.1f}%")
-            time.sleep(2)
+        # Live system metrics with refresh button
+        col_refresh = st.columns([10, 1])[1]
+        if col_refresh.button("⟳", key="refresh_live"):
             st.rerun()
+        sys_metrics = get_system_metrics()
+        cols = st.columns(3)
+        cols[0].metric("CPU", f"{sys_metrics['cpu']:.1f}%")
+        cols[1].metric("Memory", f"{sys_metrics['memory']:.1f}%")
+        cols[2].metric("Disk", f"{sys_metrics['disk']:.1f}%")
 
+    # ----- Users Tab -----
     with tabs[1]:
         st.subheader("User Management")
 
@@ -763,11 +778,11 @@ if st.session_state.admin_mode:
             with st.form("add_user_form"):
                 col1, col2 = st.columns(2)
                 with col1:
-                    new_username = st.text_input("Username")
-                    new_password = st.text_input("Password", type="password")
+                    new_username = st.text_input("Username", key="add_user_username")
+                    new_password = st.text_input("Password", type="password", key="add_user_pass")
                 with col2:
-                    confirm_password = st.text_input("Confirm Password", type="password")
-                    new_is_admin = st.checkbox("Admin")
+                    confirm_password = st.text_input("Confirm Password", type="password", key="add_user_confirm")
+                    new_is_admin = st.checkbox("Admin", key="add_user_admin")
                 submitted = st.form_submit_button("Create User")
                 if submitted:
                     if new_password != confirm_password:
@@ -785,13 +800,18 @@ if st.session_state.admin_mode:
 
         users_df = get_user_message_counts()
         if users_df.empty:
-            st.info("No users found.")
+            st.info("👥 No users found. Create one using the form above.")
         else:
-            # Display main table with selected columns
-            display_columns = [
-                'username', 'is_admin', 'created_at', 'total_messages',
-                'success_rate', 'avg_response_time', 'last_active', 'most_used_model'
-            ]
+            # Build display columns only from existing columns
+            available_cols = users_df.columns.tolist()
+            display_columns = ['username', 'is_admin', 'created_at', 'total_messages']
+            optional_cols = ['success_rate', 'avg_response_time', 'last_active', 'most_used_model']
+            for col in optional_cols:
+                if col in available_cols:
+                    display_columns.append(col)
+
+            display_df = users_df[display_columns].copy()
+            # Rename for display
             rename_map = {
                 'username': 'Username',
                 'is_admin': 'Admin',
@@ -802,20 +822,20 @@ if st.session_state.admin_mode:
                 'last_active': 'Last Active',
                 'most_used_model': 'Fav Model'
             }
-            display_df = users_df[display_columns].rename(columns=rename_map)
+            display_df = display_df.rename(columns={k: v for k, v in rename_map.items() if k in display_df.columns})
             st.dataframe(display_df, use_container_width=True)
 
-            # Debug: show raw dataframe if debug mode enabled
-            if st.session_state.get("debug_mode", False):
-                with st.expander("🔍 Raw Data (Debug)"):
+            # Debug raw data
+            if st.session_state.debug_mode:
+                with st.expander("🔍 Raw User Data (Debug)"):
                     st.dataframe(users_df)
 
             # Edit/Delete per user
-            st.markdown("### Edit / Delete Users")
+            st.markdown("### ✏️ Edit / Delete Users")
             for _, row in users_df.iterrows():
                 if row['username'] == st.session_state.username:
-                    continue  # skip self
-                with st.expander(f"✏️ {row['username']} (ID: {row['id']})"):
+                    continue
+                with st.expander(f"{row['username']} (ID: {row['id']})"):
                     col1, col2 = st.columns(2)
                     with col1:
                         new_name = st.text_input("Username", value=row['username'], key=f"name_{row['id']}")
@@ -840,37 +860,46 @@ if st.session_state.admin_mode:
                             else:
                                 st.error(msg)
 
+    # ----- Analytics Tab -----
     with tabs[2]:
         st.subheader("Model Performance")
-        perf = get_model_performance(30)  # increased to 30 days
+        perf = get_model_performance(30)
         if perf.empty:
-            st.info("No model performance data yet.")
+            st.info("📉 No model performance data yet. Start chatting to see metrics.")
         else:
-            fig1 = px.line(perf, x="day", y="requests", color="model_key", title="Daily Requests")
-            st.plotly_chart(fig1, use_container_width=True)
-            fig2 = px.line(perf, x="day", y="avg_response", color="model_key", title="Avg Response Time (ms)")
-            st.plotly_chart(fig2, use_container_width=True)
-            fig3 = px.bar(perf, x="day", y="errors", color="model_key", title="Daily Errors")
-            st.plotly_chart(fig3, use_container_width=True)
+            # Check required columns
+            if 'day' in perf.columns and 'requests' in perf.columns and 'model_key' in perf.columns:
+                fig1 = px.line(perf, x="day", y="requests", color="model_key", title="Daily Requests")
+                st.plotly_chart(fig1, use_container_width=True)
+            if 'day' in perf.columns and 'avg_response' in perf.columns and 'model_key' in perf.columns:
+                fig2 = px.line(perf, x="day", y="avg_response", color="model_key", title="Avg Response Time (ms)")
+                st.plotly_chart(fig2, use_container_width=True)
+            if 'day' in perf.columns and 'errors' in perf.columns and 'model_key' in perf.columns:
+                fig3 = px.bar(perf, x="day", y="errors", color="model_key", title="Daily Errors")
+                st.plotly_chart(fig3, use_container_width=True)
 
         st.subheader("User Activity")
         act = get_user_activity_summary(30)
         if act.empty:
-            st.info("No user activity data yet.")
+            st.info("📊 No user activity data yet.")
         else:
-            fig4 = px.line(act, x="day", y="active_users", title="Daily Active Users")
-            st.plotly_chart(fig4)
-            fig5 = px.line(act, x="day", y="total_queries", title="Daily Queries")
-            st.plotly_chart(fig5)
+            if 'day' in act.columns and 'active_users' in act.columns:
+                fig4 = px.line(act, x="day", y="active_users", title="Daily Active Users")
+                st.plotly_chart(fig4, use_container_width=True)
+            if 'day' in act.columns and 'total_queries' in act.columns:
+                fig5 = px.line(act, x="day", y="total_queries", title="Daily Queries")
+                st.plotly_chart(fig5, use_container_width=True)
 
         st.subheader("System Metrics History")
         sys_hist = get_system_metrics_history(24)
         if sys_hist.empty:
-            st.info("No system metrics yet.")
+            st.info("💻 No system metrics yet.")
         else:
-            fig6 = px.line(sys_hist, x="time", y=["cpu", "memory", "disk"], title="System Resources")
-            st.plotly_chart(fig6)
+            if all(col in sys_hist.columns for col in ['time', 'cpu', 'memory', 'disk']):
+                fig6 = px.line(sys_hist, x="time", y=["cpu", "memory", "disk"], title="System Resources")
+                st.plotly_chart(fig6, use_container_width=True)
 
+    # ----- Knowledge Base Tab -----
     with tabs[3]:
         st.subheader("Knowledge Base")
         col1, col2 = st.columns(2)
@@ -884,10 +913,11 @@ if st.session_state.admin_mode:
                 st.metric("Index Size", "N/A")
         kb_hist = get_kb_history(30)
         if kb_hist.empty:
-            st.info("No knowledge base history yet. It will appear after the first rebuild.")
+            st.info("📚 No knowledge base history yet. It will appear after the first rebuild.")
         else:
-            fig = px.line(kb_hist, x="time", y="doc_count", title="Document Count Over Time")
-            st.plotly_chart(fig)
+            if 'time' in kb_hist.columns and 'doc_count' in kb_hist.columns:
+                fig = px.line(kb_hist, x="time", y="doc_count", title="Document Count Over Time")
+                st.plotly_chart(fig, use_container_width=True)
         if st.button("🔄 Rebuild Now"):
             if st.checkbox("Confirm rebuild"):
                 with st.spinner("Rebuilding..."):
@@ -900,6 +930,7 @@ if st.session_state.admin_mode:
                     else:
                         st.error("Rebuild failed")
 
+    # ----- Tasks Tab -----
     with tabs[4]:
         st.subheader("Active Tasks")
         active = get_active_tasks()
@@ -914,30 +945,31 @@ if st.session_state.admin_mode:
                 else:
                     cols[3].write("—")
         else:
-            st.info("No active tasks.")
+            st.info("⏳ No active tasks.")
         st.subheader("Task History")
         hist = get_task_history(100)
         if hist.empty:
-            st.info("No task history yet.")
+            st.info("📋 No task history yet.")
         else:
-            st.dataframe(hist)
+            st.dataframe(hist, use_container_width=True)
 
+    # ----- Insights Tab -----
     with tabs[5]:
         st.subheader("AI Insights")
         perf = get_model_performance(1)
-        if not perf.empty:
+        if not perf.empty and 'errors' in perf.columns and 'requests' in perf.columns:
             err_rate = perf['errors'].sum() / max(perf['requests'].sum(), 1)
             if err_rate > 0.1:
-                st.warning(f"High error rate ({err_rate:.1%}) in last 24h")
+                st.warning(f"⚠️ High error rate ({err_rate:.1%}) in last 24h")
             else:
-                st.success("Error rates normal")
+                st.success("✅ Error rates normal")
         else:
             st.info("No recent performance data.")
 
         act = get_user_activity_summary(14)
-        if not act.empty and len(act) > 5:
+        if not act.empty and len(act) > 5 and 'total_queries' in act.columns:
             avg = act.tail(7)['total_queries'].mean()
-            st.info(f"Forecast: ~{int(avg)} queries/day next week")
+            st.info(f"📈 Forecast: ~{int(avg)} queries/day next week")
         else:
             st.info("Insufficient activity data for forecasting.")
 
@@ -947,17 +979,18 @@ if st.session_state.admin_mode:
             age = datetime.now() - datetime.fromtimestamp(VECTORDB_PATH.stat().st_mtime)
             if age.days > 7:
                 recs.append(("KB is >7 days old. Rebuild?", "Rebuild"))
-        sys = get_system_metrics()
-        if sys["cpu"] > 80:
+        sys_metrics = get_system_metrics()
+        if sys_metrics["cpu"] > 80:
             recs.append(("CPU >80%. Scale up?", None))
-        if sys["memory"] > 80:
+        if sys_metrics["memory"] > 80:
             recs.append(("Memory >80%. Increase RAM?", None))
         if recs:
             for r, _ in recs:
                 st.write(f"• {r}")
         else:
-            st.success("All systems nominal")
+            st.success("✅ All systems nominal")
 
+    # ----- System Tab -----
     with tabs[6]:
         st.subheader("System Control")
         if st.button("📥 Export Analytics"):

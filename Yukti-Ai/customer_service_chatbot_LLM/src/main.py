@@ -1,11 +1,6 @@
 """
-Professional WhatsApp/Instagram‑style chat interface for Yukti AI.
-Features:
-- Voice input (browser speech recognition)
-- File upload (attached to next message)
-- Real‑time video progress within chat
-- No task queue in sidebar
-- Robust error handling
+Professional WhatsApp‑style chat interface for Yukti AI.
+All features working within Streamlit – no external React needed.
 """
 
 import os
@@ -117,7 +112,7 @@ st.markdown("""
         margin-top: 0.2rem;
         text-align: right;
     }
-    /* Chat input bar container */
+    /* Chat input bar container – fixed at bottom */
     .chat-input-container {
         position: fixed;
         bottom: 0;
@@ -152,6 +147,8 @@ st.markdown("""
         cursor: pointer;
         transition: all 0.2s;
         box-shadow: 0 2px 5px rgba(0,0,0,0.3);
+        border: none;
+        outline: none;
     }
     .chat-bar-button:hover {
         background: #3b4a54;
@@ -179,16 +176,8 @@ st.markdown("""
     .stTextInput > label {
         display: none;
     }
-    /* Progress message */
-    .progress-message {
-        background: #1f2c33;
-        border-left: 4px solid #00a884;
-        padding: 1rem;
-        border-radius: 12px;
-        margin: 0.5rem 0;
-    }
     /* Video container */
-    .video-container {
+    .stVideo {
         margin: 0.5rem 0;
     }
     /* Sidebar styling */
@@ -288,84 +277,16 @@ with st.sidebar:
         st.rerun()
 
 # ----------------------------------------------------------------------
-# JavaScript for voice and file input (reliable, tested)
+# Hidden elements for JavaScript communication
 # ----------------------------------------------------------------------
-st.components.v1.html("""
-<div id="voice-file-controls" style="display: none;">
-    <input type="file" id="hidden-file-input" style="display: none;" />
-</div>
-<script>
-(function() {
-    let fileInput = document.getElementById('hidden-file-input');
-    if (!fileInput) {
-        fileInput = document.createElement('input');
-        fileInput.type = 'file';
-        fileInput.id = 'hidden-file-input';
-        fileInput.style.display = 'none';
-        document.body.appendChild(fileInput);
-    }
+# This text input will receive file data from JavaScript
+file_receiver = st.text_input("file_receiver", key="file_receiver", label_visibility="collapsed", value="", placeholder="")
 
-    // Handle file selection
-    fileInput.addEventListener('change', function(e) {
-        if (e.target.files.length > 0) {
-            const file = e.target.files[0];
-            const reader = new FileReader();
-            reader.onload = function(ev) {
-                // Send data to Streamlit via custom event
-                const fileDataEvent = new CustomEvent('file-selected', {
-                    detail: { name: file.name, data: ev.target.result }
-                });
-                window.dispatchEvent(fileDataEvent);
-            };
-            reader.readAsDataURL(file);
-        }
-    });
-
-    // Expose functions globally
-    window.startVoiceRecognition = function() {
-        if (!('webkitSpeechRecognition' in window) && !('SpeechRecognition' in window)) {
-            alert('Voice recognition not supported in this browser. Please use Chrome or Edge.');
-            return;
-        }
-        const recognition = new (window.SpeechRecognition || window.webkitSpeechRecognition)();
-        recognition.lang = 'en-US';
-        recognition.interimResults = false;
-        recognition.maxAlternatives = 1;
-
-        recognition.start();
-
-        recognition.onresult = function(event) {
-            const transcript = event.results[0][0].transcript;
-            // Find the text input and set its value
-            const textInput = document.querySelector('input[data-testid="stTextInput"]');
-            if (textInput) {
-                textInput.value = transcript;
-                // Trigger input event to update Streamlit state
-                textInput.dispatchEvent(new Event('input', { bubbles: true }));
-            }
-        };
-
-        recognition.onerror = function(event) {
-            alert('Voice error: ' + event.error);
-        };
-    };
-
-    window.triggerFileUpload = function() {
-        document.getElementById('hidden-file-input').click();
-    };
-})();
-</script>
-""", height=0)
-
-# Listen for custom file events via st.markdown with a hidden div that we update
-# We'll use a hidden text input to receive the file data from JS
-file_data_receiver = st.text_input("file_receiver", key="file_receiver", label_visibility="collapsed", value="", placeholder="")
-
-# If the hidden input changes, it means JS sent file data
-if file_data_receiver and not st.session_state.uploaded_file:
+# If file_receiver has data, decode and store it
+if file_receiver and not st.session_state.uploaded_file:
     try:
-        # Expected format: "filename,base64data"
-        parts = file_data_receiver.split(",", 1)
+        # Format: "filename,base64data"
+        parts = file_receiver.split(",", 1)
         if len(parts) == 2:
             file_name, b64data = parts
             file_bytes = base64.b64decode(b64data)
@@ -377,15 +298,87 @@ if file_data_receiver and not st.session_state.uploaded_file:
         st.session_state.uploaded_file = None
 
 # ----------------------------------------------------------------------
-# Custom chat input bar
+# JavaScript for voice and file input
 # ----------------------------------------------------------------------
+st.markdown("""
+<script>
+// Global variables
+let fileInput = null;
+
+// Create hidden file input when page loads
+(function() {
+    fileInput = document.createElement('input');
+    fileInput.type = 'file';
+    fileInput.id = 'hidden-file-input';
+    fileInput.style.display = 'none';
+    document.body.appendChild(fileInput);
+
+    // Handle file selection
+    fileInput.addEventListener('change', function(e) {
+        if (e.target.files.length > 0) {
+            const file = e.target.files[0];
+            const reader = new FileReader();
+            reader.onload = function(ev) {
+                const data = ev.target.result; // base64
+                // Send to Streamlit via the hidden text input
+                const fileReceiver = window.parent.document.querySelector('input[data-testid="stTextInput"][aria-label="file_receiver"]');
+                if (fileReceiver) {
+                    fileReceiver.value = file.name + ',' + data.split(',')[1];
+                    // Trigger input event to update Streamlit state
+                    fileReceiver.dispatchEvent(new Event('input', { bubbles: true }));
+                }
+            };
+            reader.readAsDataURL(file);
+        }
+    });
+})();
+
+// Voice recognition function
+window.startVoiceRecognition = function() {
+    if (!('webkitSpeechRecognition' in window) && !('SpeechRecognition' in window)) {
+        alert('Voice recognition not supported in this browser. Please use Chrome or Edge.');
+        return;
+    }
+    const recognition = new (window.SpeechRecognition || window.webkitSpeechRecognition)();
+    recognition.lang = 'en-US';
+    recognition.interimResults = false;
+    recognition.maxAlternatives = 1;
+
+    recognition.start();
+
+    recognition.onresult = function(event) {
+        const transcript = event.results[0][0].transcript;
+        // Find the text input (our message input)
+        const textInput = window.parent.document.querySelector('input[data-testid="stTextInput"][aria-label="Message"]');
+        if (textInput) {
+            textInput.value = transcript;
+            textInput.dispatchEvent(new Event('input', { bubbles: true }));
+        }
+    };
+
+    recognition.onerror = function(event) {
+        alert('Voice error: ' + event.error);
+    };
+};
+
+// File upload trigger
+window.triggerFileUpload = function() {
+    document.getElementById('hidden-file-input').click();
+};
+</script>
+""", unsafe_allow_html=True)
+
+# ----------------------------------------------------------------------
+# Custom chat input bar (fixed at bottom)
+# ----------------------------------------------------------------------
+# We'll use columns to place the buttons and input
 cols = st.columns([1, 1, 8])
 with cols[0]:
     st.markdown('<button class="chat-bar-button" onclick="window.startVoiceRecognition()">🎤</button>', unsafe_allow_html=True)
 with cols[1]:
     st.markdown('<button class="chat-bar-button" onclick="window.triggerFileUpload()">📎</button>', unsafe_allow_html=True)
 with cols[2]:
-    prompt = st.text_input("Message", key="message_input", label_visibility="collapsed", placeholder="Type a message", on_change=None)
+    prompt = st.text_input("Message", key="message_input", label_visibility="collapsed", placeholder="Type a message")
 
 # ----------------------------------------------------------------------
 # Display all messages (with timestamps)
@@ -441,7 +434,7 @@ for msg in st.session_state.messages:
 # Process user message when Enter is pressed
 # ----------------------------------------------------------------------
 if prompt and prompt.strip():
-    # Clear the input immediately to prevent double-send on rerun
+    # Clear the input immediately to prevent double-send
     current_prompt = prompt
     st.session_state.message_input = ""
 
@@ -557,7 +550,6 @@ if prompt and prompt.strip():
                             result = think(current_prompt, history, model_key, language=st.session_state.conversation_language)
 
             if result and result.get("type") == "async":
-                task_id = result.get("task_id")
                 # We'll update via polling
                 pass
             elif result and result.get("type") == "sync":
@@ -614,9 +606,10 @@ if prompt and prompt.strip():
 # Real‑time video progress update (poll every 2 seconds)
 # ----------------------------------------------------------------------
 if st.session_state.tasks:
-    # Update each pending task
+    any_pending = False
     for task_id, task_info in list(st.session_state.tasks.items()):
         if task_info['status'] in ('submitted', 'pending', 'processing'):
+            any_pending = True
             try:
                 updated = get_task_status(task_id)
                 if updated:
@@ -639,7 +632,7 @@ if st.session_state.tasks:
                             break
             except Exception as e:
                 logger.error(f"Error polling task {task_id}: {e}")
-    # If there are still pending tasks, rerun after a short delay
-    if any(t['status'] in ('submitted', 'pending', 'processing') for t in st.session_state.tasks.values()):
+    # If there are pending tasks, rerun after a short delay
+    if any_pending:
         time.sleep(2)
         st.rerun()

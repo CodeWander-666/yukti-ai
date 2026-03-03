@@ -190,10 +190,12 @@ def init_db():
         conn.commit()
         conn.close()
         logger.info("Database initialized successfully")
+        return True
     except Exception as e:
         logger.exception("Database initialization failed")
         st.error(f"Database error: {e}")
         st.stop()
+        return False
 
 # Run database init
 init_db()
@@ -417,6 +419,7 @@ def get_user_message_counts() -> pd.DataFrame:
         """
         df = pd.read_sql_query(query, conn)
         conn.close()
+        logger.info(f"Fetched {len(df)} user message count rows")
         return df
     except Exception as e:
         logger.exception("Failed to get user message counts")
@@ -502,6 +505,7 @@ def get_model_performance(days: int = 7) -> pd.DataFrame:
         """
         df = pd.read_sql_query(query, conn)
         conn.close()
+        logger.info(f"Fetched {len(df)} model performance rows")
         return df
     except Exception as e:
         logger.exception("Failed to get model performance")
@@ -523,6 +527,7 @@ def get_user_activity_summary(days: int = 30) -> pd.DataFrame:
         """
         df = pd.read_sql_query(query, conn)
         conn.close()
+        logger.info(f"Fetched {len(df)} user activity summary rows")
         return df
     except Exception as e:
         logger.exception("Failed to get user activity summary")
@@ -544,6 +549,7 @@ def get_system_metrics_history(hours: int = 24) -> pd.DataFrame:
         """
         df = pd.read_sql_query(query, conn)
         conn.close()
+        logger.info(f"Fetched {len(df)} system metrics rows")
         return df
     except Exception as e:
         logger.exception("Failed to get system metrics history")
@@ -564,6 +570,7 @@ def get_kb_history(days: int = 30) -> pd.DataFrame:
         """
         df = pd.read_sql_query(query, conn)
         conn.close()
+        logger.info(f"Fetched {len(df)} KB history rows")
         return df
     except Exception as e:
         logger.exception("Failed to get KB history")
@@ -590,10 +597,26 @@ def get_task_history(limit=100) -> pd.DataFrame:
         """
         df = pd.read_sql_query(query, conn)
         conn.close()
+        logger.info(f"Fetched {len(df)} task history rows")
         return df
     except Exception as e:
         logger.exception("Failed to get task history")
         return pd.DataFrame()
+
+def get_database_stats() -> Dict[str, int]:
+    """Return row counts for main tables."""
+    stats = {}
+    try:
+        conn = sqlite3.connect(str(DB_PATH))
+        c = conn.cursor()
+        tables = ["users", "user_activity", "tasks", "system_metrics", "kb_metrics"]
+        for table in tables:
+            c.execute(f"SELECT COUNT(*) FROM {table}")
+            stats[table] = c.fetchone()[0]
+        conn.close()
+    except Exception as e:
+        logger.error(f"Failed to get database stats: {e}")
+    return stats
 
 # ----------------------------------------------------------------------
 # Session state initialization
@@ -634,7 +657,6 @@ if not st.session_state.logged_in:
                     st.session_state.username = username
                     st.session_state.is_admin = is_admin
                     st.session_state.admin_mode = is_admin  # admin sees dashboard
-                    show_success_toast(f"Welcome back, {username}!")
                     st.rerun()
                 else:
                     st.error("Invalid username or password")
@@ -651,7 +673,7 @@ if not st.session_state.logged_in:
                 else:
                     success, msg = register_user(new_username, new_password)
                     if success:
-                        show_success_toast("Account created! Please log in.")
+                        st.success("Account created! Please log in.")
                         st.rerun()
                     else:
                         st.error(msg)
@@ -731,7 +753,7 @@ with st.sidebar:
             success = create_vector_db()
             if success:
                 st.session_state.kb_status = get_kb_detailed_status()
-                show_success_toast("Knowledge base updated")
+                st.success("Knowledge base updated")
                 st.rerun()
             else:
                 st.error("Update failed")
@@ -768,7 +790,7 @@ with st.sidebar:
 
     if st.button("🗑️ Clear Chat", use_container_width=True):
         st.session_state.messages = []
-        show_success_toast("Chat cleared")
+        st.success("Chat cleared")
         st.rerun()
 
 # ----------------------------------------------------------------------
@@ -784,6 +806,17 @@ if st.session_state.admin_mode:
     record_system_metrics()
     record_kb_metrics()
 
+    # Database diagnostics (for debugging)
+    with st.expander("🔍 Database Diagnostics (click to expand)"):
+        db_stats = get_database_stats()
+        col1, col2, col3, col4, col5 = st.columns(5)
+        col1.metric("Users", db_stats.get("users", 0))
+        col2.metric("User Activity", db_stats.get("user_activity", 0))
+        col3.metric("Tasks", db_stats.get("tasks", 0))
+        col4.metric("System Metrics", db_stats.get("system_metrics", 0))
+        col5.metric("KB Metrics", db_stats.get("kb_metrics", 0))
+        st.caption("If these counts are zero, the corresponding tables are empty – that's normal on a fresh install.")
+
     # Create tabs
     tabs = st.tabs([
         "📊 Overview",
@@ -797,24 +830,25 @@ if st.session_state.admin_mode:
 
     # --- Overview Tab ---
     with tabs[0]:
-        st.subheader("Real‑time System Status")
-        # Quick stats (static, but will be updated in loop)
+        st.subheader("System Status Overview")
+
+        # Quick stats
         col1, col2, col3, col4 = st.columns(4)
         with col1:
             total_users = len(get_all_users())
-            metric_card("Total Users", total_users)
+            st.metric("Total Users", total_users)
         with col2:
             kb_docs = get_document_count() or 0
-            metric_card("Knowledge Base Docs", kb_docs)
+            st.metric("Knowledge Base Docs", kb_docs)
         with col3:
             active_tasks_count = len(get_active_tasks())
-            metric_card("Active Tasks", active_tasks_count)
+            st.metric("Active Tasks", active_tasks_count)
         with col4:
             if VECTORDB_PATH.exists():
                 mtime = datetime.fromtimestamp(VECTORDB_PATH.stat().st_mtime)
-                metric_card("Last KB Update", mtime.strftime("%Y-%m-%d %H:%M"))
+                st.metric("Last KB Update", mtime.strftime("%Y-%m-%d %H:%M"))
             else:
-                metric_card("Last KB Update", "Never")
+                st.metric("Last KB Update", "Never")
 
         # Real‑time system metrics (updates every 2 seconds)
         metrics_placeholder = st.empty()
@@ -846,7 +880,7 @@ if st.session_state.admin_mode:
                         ok, msg = create_user(new_username, new_password, new_is_admin)
                         if ok:
                             log_admin_action(st.session_state.user_id, "CREATE_USER", new_username)
-                            show_success_toast("User created")
+                            st.success("User created")
                             st.rerun()
                         else:
                             st.error(msg)
@@ -878,7 +912,7 @@ if st.session_state.admin_mode:
                                 ok, msg = update_user(user_id, new_username, new_password or None, new_is_admin)
                                 if ok:
                                     log_admin_action(st.session_state.user_id, "UPDATE_USER", new_username)
-                                    show_success_toast("User updated")
+                                    st.success("User updated")
                                     st.rerun()
                                 else:
                                     st.error(msg)
@@ -886,7 +920,7 @@ if st.session_state.admin_mode:
                                 st.error("User not found")
                     if st.button("Delete", key=f"user_{row['username']}_delete"):
                         # Confirm
-                        if confirm_dialog("Delete User", f"Delete {row['username']}? This cannot be undone."):
+                        if st.checkbox("Confirm deletion", key=f"confirm_{row['username']}"):
                             user_id = None
                             for u in get_all_users():
                                 if u["username"] == row["username"]:
@@ -896,14 +930,14 @@ if st.session_state.admin_mode:
                                 ok, msg = delete_user(user_id)
                                 if ok:
                                     log_admin_action(st.session_state.user_id, "DELETE_USER", row["username"])
-                                    show_success_toast("User deleted")
+                                    st.success("User deleted")
                                     st.rerun()
                                 else:
                                     st.error(msg)
                             else:
                                 st.error("User not found")
         else:
-            st.info("No users found.")
+            st.info("No users found in database.")
 
     # --- Analytics Tab ---
     with tabs[2]:
@@ -919,7 +953,7 @@ if st.session_state.admin_mode:
             fig3 = px.bar(perf_df, x="day", y="errors", color="model_key", title="Daily Errors")
             st.plotly_chart(fig3, use_container_width=True)
         else:
-            st.info("No performance data yet.")
+            st.info("No performance data yet. Start using the chat to generate data.")
 
         st.subheader("User Activity (Last 30 Days)")
         activity_df = get_user_activity_summary(30)
@@ -929,7 +963,7 @@ if st.session_state.admin_mode:
             fig5 = px.line(activity_df, x="day", y="total_queries", title="Daily Queries")
             st.plotly_chart(fig5, use_container_width=True)
         else:
-            st.info("No activity data yet.")
+            st.info("No activity data yet. Users need to interact with the chat.")
 
         st.subheader("System Metrics History (Last 24h)")
         sys_df = get_system_metrics_history(24)
@@ -937,37 +971,37 @@ if st.session_state.admin_mode:
             fig6 = px.line(sys_df, x="time", y=["cpu", "memory", "disk"], title="System Resources")
             st.plotly_chart(fig6, use_container_width=True)
         else:
-            st.info("No system metrics yet.")
+            st.info("No system metrics yet. The dashboard records metrics automatically over time.")
 
     # --- Knowledge Base Tab ---
     with tabs[3]:
         st.subheader("Knowledge Base Analytics")
         col1, col2 = st.columns(2)
         with col1:
-            metric_card("Current Documents", get_document_count() or 0)
+            st.metric("Current Documents", get_document_count() or 0)
         with col2:
             if VECTORDB_PATH.exists():
                 size_mb = sum(f.stat().st_size for f in VECTORDB_PATH.glob("*") if f.is_file()) / (1024*1024)
-                metric_card("Index Size", f"{size_mb:.2f} MB")
+                st.metric("Index Size", f"{size_mb:.2f} MB")
             else:
-                metric_card("Index Size", "N/A")
+                st.metric("Index Size", "N/A")
 
         kb_df = get_kb_history(30)
         if not kb_df.empty:
             fig = px.line(kb_df, x="time", y="doc_count", title="Document Count Over Time")
             st.plotly_chart(fig, use_container_width=True)
         else:
-            st.info("No KB history yet. Rebuild to start tracking.")
+            st.info("No KB history yet. Rebuild the knowledge base to start tracking.")
 
         if st.button("🔄 Rebuild Knowledge Base Now"):
-            if confirm_dialog("Rebuild KB", "This may take a few minutes. Continue?"):
+            if st.checkbox("Confirm rebuild – this may take a few minutes"):
                 with st.spinner("Rebuilding..."):
                     success = create_vector_db()
                     if success:
                         st.session_state.kb_status = get_kb_detailed_status()
                         record_kb_metrics()
                         log_admin_action(st.session_state.user_id, "REBUILD_KB")
-                        show_success_toast("Knowledge base rebuilt")
+                        st.success("Knowledge base rebuilt")
                         st.rerun()
                     else:
                         st.error("Rebuild failed")
@@ -988,7 +1022,7 @@ if st.session_state.admin_mode:
                     else:
                         cols[3].write("—")
         else:
-            st.info("No active tasks.")
+            st.info("No active tasks at the moment.")
 
         st.subheader("Task History (Last 100)")
         task_history = get_task_history(100)
@@ -1010,7 +1044,7 @@ if st.session_state.admin_mode:
             else:
                 st.success("✅ Error rates normal.")
         else:
-            st.info("No performance data yet.")
+            st.info("Not enough performance data to detect anomalies.")
 
         # Load prediction (simple linear regression)
         activity_df = get_user_activity_summary(14)
@@ -1050,21 +1084,18 @@ if st.session_state.admin_mode:
                 if action:
                     if cols[1].button(action, key=f"rec_{hash(rec)}"):
                         if action_code == "REBUILD_KB":
-                            # Trigger rebuild (same as KB tab)
                             with st.spinner("Rebuilding..."):
                                 success = create_vector_db()
                                 if success:
                                     st.session_state.kb_status = get_kb_detailed_status()
                                     record_kb_metrics()
                                     log_admin_action(st.session_state.user_id, "REBUILD_KB")
-                                    show_success_toast("Knowledge base rebuilt")
+                                    st.success("Knowledge base rebuilt")
                                     st.rerun()
                                 else:
                                     st.error("Rebuild failed")
                         elif action_code == "CLEAR_TASKS":
-                            if confirm_dialog("Clear Tasks", "Delete all stale tasks?"):
-                                # Implement clear logic (for now just a message)
-                                show_success_toast("Tasks cleared (not implemented)")
+                            st.info("Clear tasks not implemented yet.")
         else:
             st.success("All systems nominal.")
 

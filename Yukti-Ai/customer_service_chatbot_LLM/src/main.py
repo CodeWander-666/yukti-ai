@@ -221,7 +221,7 @@ if admin_password:
         conn = sqlite3.connect(str(DB_PATH))
         c = conn.cursor()
         # Check if admin user exists
-        c.execute("SELECT id, password_hash FROM users WHERE username = ?", (admin_username,))
+        c.execute("SELECT id, password_hash FROM users WHERE username = ?", (admin1234,))
         row = c.fetchone()
         
         import bcrypt

@@ -598,6 +598,7 @@ if prompt := st.chat_input("Ask me anything..."):
             logger.exception("Fatal error in main chat loop")
             full_response = ""
 
+
     if result and result.get("type") == "sync" and result.get("answer"):
         st.session_state.messages.append({"role": "assistant", "content": answer, "media": media})
     elif result and result.get("type") == "async":

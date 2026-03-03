@@ -1,35 +1,36 @@
+"""
+Pure embedding loader – no Streamlit dependencies.
+Used by both the main app and the knowledge updater.
+"""
+
 import logging
-import sys
 from functools import lru_cache
 
 from langchain_community.embeddings import HuggingFaceEmbeddings
 
 logger = logging.getLogger(__name__)
 
-def get_embeddings(use_streamlit_cache: bool = False):
+# ----------------------------------------------------------------------
+# Embedding model – cached to avoid reloading
+# ----------------------------------------------------------------------
+@lru_cache(maxsize=1)
+def get_embeddings():
     """
-    Load the sentence transformer embeddings model.
-    If use_streamlit_cache is True and streamlit is available, cache the model.
-    Otherwise, load normally (for cron jobs).
+    Return a HuggingFace embedding model (all-MiniLM-L6-v2).
+    The result is cached using lru_cache to ensure only one instance is created.
+    This function can be called from both Streamlit and non‑Streamlit environments.
     """
-    model_name = "sentence-transformers/all-MiniLM-L6-v2"
     try:
-        if use_streamlit_cache and 'streamlit' in sys.modules:
-            import streamlit as st
-            @st.cache_resource
-            def _load():
-                logger.info("Loading embedding model with Streamlit cache")
-                return HuggingFaceEmbeddings(
-                    model_name=model_name,
-                    encode_kwargs={'normalize_embeddings': True}
-                )
-            return _load()
-        else:
-            logger.info("Loading embedding model without cache")
-            return HuggingFaceEmbeddings(
-                model_name=model_name,
-                encode_kwargs={'normalize_embeddings': True}
-            )
+        logger.info("Loading embedding model: sentence-transformers/all-MiniLM-L6-v2")
+        embeddings = HuggingFaceEmbeddings(
+            model_name="sentence-transformers/all-MiniLM-L6-v2",
+            model_kwargs={'device': 'cpu'},          # force CPU to avoid GPU issues
+            encode_kwargs={'normalize_embeddings': True}
+        )
+        # Quick test to ensure model loads
+        _ = embeddings.embed_query("test")
+        logger.info("Embedding model loaded successfully.")
+        return embeddings
     except Exception as e:
         logger.exception("Failed to load embedding model")
-        raise RuntimeError(f"Embedding model unavailable: {e}")
+        raise RuntimeError(f"Embedding model unavailable: {e}") from e

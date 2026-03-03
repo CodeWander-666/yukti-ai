@@ -1,6 +1,7 @@
 """
-Professional WhatsApp‑style chat interface for Yukti AI.
-All features working within Streamlit – no external React needed.
+Gemini‑style chat interface for Yukti AI with voice input, file uploads,
+real‑time video progress, and robust error handling. Fully self‑contained
+and designed for stability.
 """
 
 import os
@@ -12,6 +13,7 @@ import base64
 from pathlib import Path
 from datetime import datetime
 from io import BytesIO
+from typing import Optional, Dict, Any, List
 
 import streamlit as st
 import requests
@@ -54,7 +56,10 @@ except ImportError as e:
         return {"language": "en", "method": "fallback", "explicit_instruction": None}
 
 # Configure logging
-logging.basicConfig(level=logging.INFO, format='%(asctime)s - %(name)s - %(levelname)s - %(message)s')
+logging.basicConfig(
+    level=logging.INFO,
+    format='%(asctime)s - %(name)s - %(levelname)s - %(message)s'
+)
 logger = logging.getLogger(__name__)
 
 # ----------------------------------------------------------------------
@@ -68,7 +73,7 @@ st.set_page_config(
 )
 
 # ----------------------------------------------------------------------
-# WhatsApp‑style CSS
+# Custom CSS – WhatsApp/Gemini style
 # ----------------------------------------------------------------------
 st.markdown("""
 <style>
@@ -193,6 +198,27 @@ st.markdown("""
     .stChatInput {
         display: none !important;
     }
+    /* File preview chips */
+    .file-chip {
+        display: inline-flex;
+        align-items: center;
+        background: #2a3942;
+        border-radius: 16px;
+        padding: 4px 12px;
+        margin-right: 8px;
+        margin-bottom: 4px;
+        color: #e9edef;
+        font-size: 0.9rem;
+    }
+    .file-chip .remove {
+        margin-left: 8px;
+        cursor: pointer;
+        color: #8696a0;
+        font-weight: bold;
+    }
+    .file-chip .remove:hover {
+        color: #ff4b4b;
+    }
 </style>
 """, unsafe_allow_html=True)
 
@@ -238,12 +264,72 @@ if "conversation_language" not in st.session_state:
 if "uploaded_file" not in st.session_state:
     st.session_state.uploaded_file = None  # (filename, bytes)
 
-# Flag to clear input on next run
+# Flag to clear input on next run (fixes widget modification error)
 if "clear_input" not in st.session_state:
     st.session_state.clear_input = False
 
+if "processing" not in st.session_state:
+    st.session_state.processing = False  # disable buttons during API calls
+
+if "pending_files" not in st.session_state:
+    st.session_state.pending_files = []  # list of (name, bytes) for files attached but not yet sent
+
 # ----------------------------------------------------------------------
-# Sidebar (simplified, no task list)
+# Helper functions
+# ----------------------------------------------------------------------
+def safe_download(url: str, file_name: str, media_type: str):
+    """Download media with error handling."""
+    try:
+        with st.spinner("Preparing download..."):
+            response = requests.get(url, stream=True)
+            response.raise_for_status()
+            st.download_button(
+                f"📥 Download {media_type}",
+                data=response.iter_content(chunk_size=8192),
+                file_name=file_name,
+                key=f"dl_{hash(url)}"
+            )
+    except Exception as e:
+        st.error(f"Download failed: {e}")
+        logger.exception(f"Download error for {url}")
+
+def handle_file_upload(uploaded_file) -> Optional[tuple]:
+    """Process a single uploaded file, return (filename, bytes) or None on error."""
+    try:
+        bytes_data = uploaded_file.getvalue()
+        return (uploaded_file.name, bytes_data)
+    except Exception as e:
+        st.error(f"Failed to read file {uploaded_file.name}: {e}")
+        logger.exception("File read error")
+        return None
+
+def add_file_chip(name: str):
+    """Generate HTML for a file chip with remove button."""
+    return f'<span class="file-chip">{name}<span class="remove" onclick="removeFile(\'{name}\')">✕</span></span>'
+
+# JavaScript to remove a pending file (will be injected later)
+st.markdown("""
+<script>
+function removeFile(fileName) {
+    // This will be handled by Streamlit via a hidden input
+    const removeInput = window.parent.document.querySelector('input[data-testid="stTextInput"][aria-label="file_remove"]');
+    if (removeInput) {
+        removeInput.value = fileName;
+        removeInput.dispatchEvent(new Event('input', { bubbles: true }));
+    }
+}
+</script>
+""", unsafe_allow_html=True)
+
+# Hidden input to receive file removal requests
+file_remove = st.text_input("file_remove", key="file_remove", label_visibility="collapsed", value="", placeholder="")
+if file_remove:
+    # Remove the file from pending_files
+    st.session_state.pending_files = [f for f in st.session_state.pending_files if f[0] != file_remove]
+    st.session_state.file_remove = ""  # clear
+
+# ----------------------------------------------------------------------
+# Sidebar – model selection and knowledge base status
 # ----------------------------------------------------------------------
 with st.sidebar:
     st.markdown("## 🧠 Model")
@@ -278,19 +364,17 @@ with st.sidebar:
         st.markdown("⚠️ **Knowledge Base Not Built**")
     st.divider()
 
-    if st.button("🗑️ Clear Chat", use_container_width=True):
+    if st.button("🗑️ Clear Chat", use_container_width=True, disabled=st.session_state.processing):
         st.session_state.messages = [
             {"role": "assistant", "content": "Hello! I'm Yukti AI. How can I help you today?", "timestamp": datetime.now().strftime("%H:%M")}
         ]
         st.rerun()
 
 # ----------------------------------------------------------------------
-# Hidden elements for JavaScript communication
+# File receiver from JavaScript (for voice/file buttons)
 # ----------------------------------------------------------------------
-# This text input will receive file data from JavaScript
 file_receiver = st.text_input("file_receiver", key="file_receiver", label_visibility="collapsed", value="", placeholder="")
 
-# If file_receiver has data, decode and store it
 if file_receiver and not st.session_state.uploaded_file:
     try:
         # Format: "filename,base64data"
@@ -299,14 +383,16 @@ if file_receiver and not st.session_state.uploaded_file:
             file_name, b64data = parts
             file_bytes = base64.b64decode(b64data)
             st.session_state.uploaded_file = (file_name, file_bytes)
-            # Clear the receiver to avoid re-processing
+            # Add to pending files
+            st.session_state.pending_files.append((file_name, file_bytes))
             st.session_state.file_receiver = ""
     except Exception as e:
-        logger.error(f"Failed to decode file: {e}")
+        st.error(f"Failed to process file: {e}")
+        logger.exception("File decode error")
         st.session_state.uploaded_file = None
 
 # ----------------------------------------------------------------------
-# JavaScript for voice and file input (runs after DOM ready)
+# JavaScript for voice and file input (reliable, waits for DOM)
 # ----------------------------------------------------------------------
 st.markdown("""
 <script>
@@ -387,26 +473,41 @@ waitForStreamlit();
 """, unsafe_allow_html=True)
 
 # ----------------------------------------------------------------------
+# Display pending files as chips above input
+# ----------------------------------------------------------------------
+if st.session_state.pending_files:
+    chips_html = '<div style="margin-bottom: 5px;">'
+    for fname, _ in st.session_state.pending_files:
+        chips_html += f'<span class="file-chip">{fname}<span class="remove" onclick="removeFile(\'{fname}\')">✕</span></span>'
+    chips_html += '</div>'
+    st.markdown(chips_html, unsafe_allow_html=True)
+
+# ----------------------------------------------------------------------
 # Custom chat input bar (fixed at bottom)
 # ----------------------------------------------------------------------
-# Use columns to place buttons and input
 cols = st.columns([1, 1, 8])
 with cols[0]:
     st.markdown('<button class="chat-bar-button" onclick="window.startVoiceRecognition()">🎤</button>', unsafe_allow_html=True)
 with cols[1]:
     st.markdown('<button class="chat-bar-button" onclick="window.triggerFileUpload()">📎</button>', unsafe_allow_html=True)
 with cols[2]:
-    # Check if we need to clear the input on this run
+    # Handle input clearing correctly
     if st.session_state.clear_input:
-        # Set a default value to force clear – Streamlit will render an empty input
         default_value = ""
         st.session_state.clear_input = False
     else:
         default_value = None
-    prompt = st.text_input("Message", key="message_input", value=default_value, label_visibility="collapsed", placeholder="Type a message")
+    prompt = st.text_input(
+        "Message",
+        key="message_input",
+        value=default_value,
+        label_visibility="collapsed",
+        placeholder="Type a message",
+        disabled=st.session_state.processing
+    )
 
 # ----------------------------------------------------------------------
-# Display all messages
+# Display all messages (with timestamps)
 # ----------------------------------------------------------------------
 for msg in st.session_state.messages:
     with st.chat_message(msg["role"]):
@@ -415,61 +516,34 @@ for msg in st.session_state.messages:
             for media in msg["media"]:
                 if media["type"] == "image":
                     st.image(media["url"], width=300)
-                    try:
-                        img_data = requests.get(media["url"]).content
-                        st.download_button(
-                            "📥 Download Image",
-                            data=img_data,
-                            file_name=f"yukti_image_{hash(media['url'])}.png",
-                            key=f"dl_img_{hash(media['url'])}"
-                        )
-                    except Exception as e:
-                        st.error(f"Download failed: {e}")
+                    safe_download(media["url"], f"yukti_image_{hash(media['url'])}.png", "Image")
                 elif media["type"] == "audio":
                     st.audio(media["url"])
-                    try:
-                        with open(media["url"], "rb") as f:
-                            audio_data = f.read()
-                        st.download_button(
-                            "📥 Download Audio",
-                            data=audio_data,
-                            file_name=f"yukti_audio_{hash(media['url'])}.wav",
-                            key=f"dl_audio_{hash(media['url'])}"
-                        )
-                    except Exception as e:
-                        st.error(f"Download failed: {e}")
+                    safe_download(media["url"], f"yukti_audio_{hash(media['url'])}.wav", "Audio")
                 elif media["type"] == "video":
                     st.video(media["url"])
-                    try:
-                        with st.spinner("Preparing download..."):
-                            response = requests.get(media["url"], stream=True)
-                            response.raise_for_status()
-                            st.download_button(
-                                "📥 Download Video",
-                                data=response.iter_content(chunk_size=8192),
-                                file_name=f"yukti_video_{hash(media['url'])}.mp4",
-                                key=f"dl_video_{hash(media['url'])}"
-                            )
-                    except Exception as e:
-                        st.error(f"Download failed: {e}")
+                    safe_download(media["url"], f"yukti_video_{hash(media['url'])}.mp4", "Video")
         if "timestamp" in msg:
             st.markdown(f"<div class='message-timestamp'>{msg['timestamp']}</div>", unsafe_allow_html=True)
 
 # ----------------------------------------------------------------------
 # Process user message when Enter is pressed
 # ----------------------------------------------------------------------
-if prompt and prompt.strip():
-    # Store current prompt and mark input to be cleared on next run
-    current_prompt = prompt
+if prompt and prompt.strip() and not st.session_state.processing:
+    # Lock UI
+    st.session_state.processing = True
     st.session_state.clear_input = True
+    current_prompt = prompt
 
-    # Get uploaded file if any
-    uploaded_file_obj = None
-    if st.session_state.uploaded_file:
-        file_name, file_bytes = st.session_state.uploaded_file
-        uploaded_file_obj = BytesIO(file_bytes)
-        uploaded_file_obj.name = file_name
-        st.session_state.uploaded_file = None  # clear after use
+    # Get pending files (convert bytes to file-like objects)
+    uploaded_files = []
+    for fname, fbytes in st.session_state.pending_files:
+        bio = BytesIO(fbytes)
+        bio.name = fname
+        uploaded_files.append(bio)
+
+    # Clear pending files (they'll be sent now)
+    st.session_state.pending_files = []
 
     # Detect language
     try:
@@ -487,28 +561,30 @@ if prompt and prompt.strip():
     elif st.session_state.conversation_language is None:
         st.session_state.conversation_language = target_lang
 
-    # Add user message
+    # Add user message to history
     st.session_state.messages.append({
         "role": "user",
         "content": current_prompt,
         "timestamp": datetime.now().strftime("%H:%M")
     })
 
-    # Prepare assistant response
+    # Prepare assistant response area
     with st.chat_message("assistant"):
         response_placeholder = st.empty()
         result = None
-        answer = ""
         full_response = ""
         media = []
 
         try:
             model_key = st.session_state.selected_model
             extra_kwargs = {}
-            if uploaded_file_obj is not None:
-                # Save to temp file for model
-                with tempfile.NamedTemporaryFile(delete=False, suffix=Path(uploaded_file_obj.name).suffix) as tmp:
-                    tmp.write(uploaded_file_obj.getvalue())
+
+            # Handle uploaded files for models that support them
+            if uploaded_files and model_key in ["Yukti‑Video", "Yukti‑Image", "Yukti‑Audio"]:
+                # For now, we only support one file at a time (as per existing logic)
+                file_obj = uploaded_files[0]
+                with tempfile.NamedTemporaryFile(delete=False, suffix=Path(file_obj.name).suffix) as tmp:
+                    tmp.write(file_obj.getvalue())
                     extra_kwargs["image_url"] = tmp.name
 
             if model_key in ["Yukti‑Flash", "Yukti‑Quantum"]:
@@ -543,15 +619,7 @@ if prompt and prompt.strip():
                     elif model_key == "Yukti‑Image":
                         image_url = model.invoke(current_prompt, **extra_kwargs)
                         st.image(image_url, width=300)
-                        try:
-                            img_data = requests.get(image_url).content
-                            st.download_button(
-                                "📥 Download Image",
-                                data=img_data,
-                                file_name=f"yukti_image_{int(time.time())}.png"
-                            )
-                        except Exception as e:
-                            st.error(f"Download failed: {e}")
+                        safe_download(image_url, f"yukti_image_{int(time.time())}.png", "Image")
                         full_response = "Image generated."
                         result = {"type": "sync", "format": "image"}
                         media.append({"type": "image", "url": image_url})
@@ -575,7 +643,7 @@ if prompt and prompt.strip():
                             result = think(current_prompt, history, model_key, language=st.session_state.conversation_language)
 
             if result and result.get("type") == "async":
-                # We'll update via polling
+                # Will be updated via polling
                 pass
             elif result and result.get("type") == "sync":
                 answer = result.get("answer", "")
@@ -608,23 +676,24 @@ if prompt and prompt.strip():
             logger.exception("Fatal error in message processing")
             full_response = ""
 
-    # Append assistant message
-    if result and result.get("type") == "sync" and full_response:
-        st.session_state.messages.append({
-            "role": "assistant",
-            "content": full_response,
-            "media": media,
-            "timestamp": datetime.now().strftime("%H:%M")
-        })
-    elif result and result.get("type") == "async":
-        st.session_state.messages.append({
-            "role": "assistant",
-            "content": full_response,
-            "task_id": result.get("task_id"),
-            "timestamp": datetime.now().strftime("%H:%M")
-        })
+        # Append assistant message to history
+        if result and result.get("type") == "sync" and full_response:
+            st.session_state.messages.append({
+                "role": "assistant",
+                "content": full_response,
+                "media": media,
+                "timestamp": datetime.now().strftime("%H:%M")
+            })
+        elif result and result.get("type") == "async":
+            st.session_state.messages.append({
+                "role": "assistant",
+                "content": full_response,
+                "task_id": result.get("task_id"),
+                "timestamp": datetime.now().strftime("%H:%M")
+            })
 
-    # Rerun to reflect new messages and cleared input
+    # Unlock UI and rerun to reflect changes
+    st.session_state.processing = False
     st.rerun()
 
 # ----------------------------------------------------------------------
@@ -657,7 +726,6 @@ if st.session_state.tasks:
                             break
             except Exception as e:
                 logger.error(f"Error polling task {task_id}: {e}")
-    # If there are pending tasks, rerun after a short delay
     if any_pending:
         time.sleep(2)
         st.rerun()

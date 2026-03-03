@@ -203,6 +203,9 @@ init_db()
 # ----------------------------------------------------------------------
 # Auto‑create admin user from secrets (Streamlit secrets or environment)
 # ----------------------------------------------------------------------
+# ----------------------------------------------------------------------
+# Ensure admin user exists (create/update from secrets)
+# ----------------------------------------------------------------------
 def get_secret(key: str, default=None):
     """Get a secret from Streamlit secrets or environment variable."""
     try:
@@ -210,26 +213,44 @@ def get_secret(key: str, default=None):
     except:
         return os.getenv(key, default)
 
-admin_user = get_secret("ADMIN_USERNAME", "admin")
-admin_pass = get_secret("ADMIN_PASSWORD")
+admin_username = get_secret("ADMIN_USERNAME", "admin")
+admin_password = get_secret("ADMIN_PASSWORD")
 
-if admin_pass:
+if admin_password:
     try:
         conn = sqlite3.connect(str(DB_PATH))
         c = conn.cursor()
-        c.execute("SELECT COUNT(*) FROM users")
-        if c.fetchone()[0] == 0:
-            import bcrypt
-            hashed = bcrypt.hashpw(admin_pass.encode('utf-8'), bcrypt.gensalt()).decode('utf-8')
+        # Check if admin user exists
+        c.execute("SELECT id, password_hash FROM users WHERE username = ?", (admin_username,))
+        row = c.fetchone()
+        
+        import bcrypt
+        if row is None:
+            # Admin user does not exist – create it
+            hashed = bcrypt.hashpw(admin_password.encode('utf-8'), bcrypt.gensalt()).decode('utf-8')
             c.execute(
                 "INSERT INTO users (username, password_hash, is_admin) VALUES (?, ?, 1)",
-                (admin_user, hashed)
+                (admin_username, hashed)
             )
             conn.commit()
-            logger.info(f"Created default admin user: {admin_user}")
+            logger.info(f"✅ Created admin user: {admin_username}")
+        else:
+            # Admin user exists – ensure they are admin and update password if needed
+            user_id, current_hash = row
+            # Ensure is_admin flag is set (in case it was changed manually)
+            c.execute("UPDATE users SET is_admin = 1 WHERE id = ?", (user_id,))
+            # Optionally update password if it has changed (remove this if not desired)
+            if not bcrypt.checkpw(admin_password.encode('utf-8'), current_hash.encode('utf-8')):
+                new_hash = bcrypt.hashpw(admin_password.encode('utf-8'), bcrypt.gensalt()).decode('utf-8')
+                c.execute(
+                    "UPDATE users SET password_hash = ? WHERE id = ?",
+                    (new_hash, user_id)
+                )
+                logger.info(f"🔄 Updated password for admin user: {admin_username}")
+            conn.commit()
         conn.close()
     except Exception as e:
-        logger.error(f"Failed to create default admin: {e}")
+        logger.error(f"Failed to ensure admin user: {e}")
 
 # ----------------------------------------------------------------------
 # Password hashing (bcrypt)

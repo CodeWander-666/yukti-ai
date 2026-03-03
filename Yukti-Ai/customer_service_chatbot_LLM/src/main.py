@@ -48,7 +48,7 @@ try:
         get_available_models,
         MODELS,
         get_task_status,
-        get_active_tasks,      # <-- FIX: added missing import
+        get_active_tasks,      # <-- FIXED: added
         ZHIPU_AVAILABLE,
         load_model,
     )
@@ -301,7 +301,7 @@ if "clear_input" not in st.session_state:
     st.session_state.clear_input = False
 
 # ----------------------------------------------------------------------
-# JavaScript for voice and file input (robust, with updated selectors)
+# JavaScript for voice and file input (robust, with correct selectors)
 # ----------------------------------------------------------------------
 st.markdown("""
 <script>
@@ -329,7 +329,8 @@ function initializeFeatures() {
             const reader = new FileReader();
             reader.onload = function(ev) {
                 const data = ev.target.result;
-                const fileReceiver = window.parent.document.querySelector('input[data-testid="stTextInput"][aria-label="file_receiver"]');
+                // Find the hidden receiver input
+                const fileReceiver = window.parent.document.querySelector('input[data-testid="stTextInput"][key="file_receiver"]');
                 if (fileReceiver) {
                     fileReceiver.value = file.name + ',' + data.split(',')[1];
                     fileReceiver.dispatchEvent(new Event('input', { bubbles: true }));
@@ -353,7 +354,8 @@ function initializeFeatures() {
 
         recognition.onresult = function(event) {
             const transcript = event.results[0][0].transcript;
-            const textInput = window.parent.document.querySelector('input[data-testid="stTextInput"][aria-label="Message"]');
+            // Find the message input by its key
+            const textInput = window.parent.document.querySelector('input[data-testid="stTextInput"][key="message_input"]');
             if (textInput) {
                 textInput.value = transcript;
                 textInput.dispatchEvent(new Event('input', { bubbles: true }));
@@ -513,7 +515,9 @@ function scrollToBottom() {
 // Scroll on load and after each Streamlit update
 scrollToBottom();
 const observer = new MutationObserver(scrollToBottom);
-observer.observe(window.parent.document.querySelector('.main > div'), { childList: true, subtree: true });
+if (window.parent.document.querySelector('.main > div')) {
+    observer.observe(window.parent.document.querySelector('.main > div'), { childList: true, subtree: true });
+}
 </script>
 """, unsafe_allow_html=True)
 

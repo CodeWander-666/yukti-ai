@@ -1,5 +1,6 @@
 """
 Original WhatsApp‑style chat interface (restored) with detailed knowledge base error reporting.
+Only additions: input clearing flag and KB diagnostics.
 """
 
 import os
@@ -224,6 +225,10 @@ if "conversation_language" not in st.session_state:
 if "uploaded_file" not in st.session_state:
     st.session_state.uploaded_file = None
 
+# NEW: flag to clear input on next run
+if "clear_input" not in st.session_state:
+    st.session_state.clear_input = False
+
 # ----------------------------------------------------------------------
 # JavaScript for voice and file input (unchanged, working)
 # ----------------------------------------------------------------------
@@ -406,7 +411,6 @@ with st.sidebar:
             logger.exception("get_active_tasks")
 
         for task_id in list(st.session_state.tasks.keys()):
-            # Simplified task render – you can replace with ui_helpers.render_task if needed
             task_info = st.session_state.tasks[task_id]
             st.markdown(f"**{task_info['variant']}** `{task_id[:8]}`")
             if task_info['status'] == 'completed' and task_info.get('result_url'):
@@ -436,7 +440,14 @@ with cols[0]:
 with cols[1]:
     st.markdown('<button class="chat-bar-button" onclick="window.triggerFileUpload()">📎</button>', unsafe_allow_html=True)
 with cols[2]:
-    prompt = st.text_input("Message", key="message_input", label_visibility="collapsed", placeholder="Type a message")
+    # Handle input clearing correctly
+    if st.session_state.clear_input:
+        default_value = ""
+        st.session_state.clear_input = False
+    else:
+        default_value = None
+
+    prompt = st.text_input("Message", key="message_input", value=default_value, label_visibility="collapsed", placeholder="Type a message")
 
 # ----------------------------------------------------------------------
 # Display all messages
@@ -456,12 +467,12 @@ for msg in st.session_state.messages:
             st.markdown(f"<div class='message-timestamp'>{msg['timestamp']}</div>", unsafe_allow_html=True)
 
 # ----------------------------------------------------------------------
-# Process user message
+# Process user message when Enter is pressed
 # ----------------------------------------------------------------------
 if prompt and prompt.strip():
     current_prompt = prompt
-    # Clear input by rerunning after processing
-    st.session_state.message_input = ""  # This will be cleared on next run
+    # Set flag to clear input on next run (instead of modifying widget directly)
+    st.session_state.clear_input = True
 
     uploaded_file_obj = None
     if st.session_state.uploaded_file:
@@ -617,9 +628,6 @@ if st.session_state.tasks:
                 updated = get_task_status(task_id)
                 if updated:
                     task_info.update(updated)
-                    if task_info['status'] == 'completed' and task_info.get('result_url'):
-                        # We'll show in sidebar; chat message not updated here
-                        pass
             except Exception as e:
                 logger.error(f"Error polling task {task_id}: {e}")
     if any_pending:

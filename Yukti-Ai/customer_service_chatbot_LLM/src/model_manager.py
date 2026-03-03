@@ -150,6 +150,7 @@ SERVICES = {
 # API Key Helpers (safe for both Streamlit and cron)
 # ----------------------------------------------------------------------
 def get_zhipu_api_key() -> Optional[str]:
+    """Retrieve Zhipu API key from secrets or environment."""
     key = None
     if STREAMLIT_AVAILABLE:
         key = st.secrets.get("ZHIPU_API_KEY")
@@ -158,6 +159,7 @@ def get_zhipu_api_key() -> Optional[str]:
     return key
 
 def get_google_api_key() -> Optional[str]:
+    """Retrieve Google API key from secrets or environment."""
     key = None
     if STREAMLIT_AVAILABLE:
         key = st.secrets.get("GOOGLE_API_KEY")
@@ -172,6 +174,7 @@ GEMINI_AVAILABLE = GEMINI_SDK_AVAILABLE and get_google_api_key() is not None
 # Concurrency Tracker (for sync models)
 # ----------------------------------------------------------------------
 class ConcurrencyTracker:
+    """Thread‑safe counter for active requests per model."""
     def __init__(self):
         self.counters = {}
         self.lock = threading.Lock()
@@ -211,6 +214,7 @@ class ZhipuClient:
         })
 
     def _request_with_retry(self, method: str, url: str, **kwargs) -> requests.Response:
+        """Make HTTP request with exponential backoff and retry."""
         max_retries = 3
         for attempt in range(max_retries):
             try:
@@ -230,9 +234,11 @@ class ZhipuClient:
         raise RuntimeError("Max retries exceeded")
 
     def text(self, model: str, prompt: str, temperature: float = 0.1, language: str = None) -> str:
+        """Generate text with optional language hint."""
         if not LANGCHAIN_OPENAI_AVAILABLE or ChatOpenAI is None:
             raise RuntimeError("langchain-openai not installed. Cannot generate text.")
 
+        # Determine target language
         if language is None:
             try:
                 from language_detector import detect_language
@@ -243,6 +249,7 @@ class ZhipuClient:
         else:
             target_lang = language
 
+        # Prepare language‑specific prompt
         if target_lang == 'hinglish':
             enhanced_prompt = f"हिंग्लिश में जवाब दें। सवाल: {prompt}"
         elif target_lang != 'en':
@@ -275,6 +282,7 @@ class ZhipuClient:
             raise RuntimeError(f"Text generation error: {e}")
 
     def image(self, model: str, prompt: str) -> str:
+        """Generate image and return URL."""
         url = f"{ZHIPU_BASE_URL}/images/generations"
         payload = {"model": model, "prompt": prompt}
         try:
@@ -312,6 +320,7 @@ class ZhipuClient:
             raise RuntimeError(f"Audio generation error: {e}")
 
     def video_submit(self, model: str, prompt: str, language: str = None, **kwargs) -> str:
+        """Submit a video generation task with optional language instruction."""
         if not ZAI_AVAILABLE:
             raise RuntimeError("Video generation requires zai-sdk.")
         if language and language != 'en':
@@ -338,6 +347,7 @@ class ZhipuClient:
             raise RuntimeError(f"Video submission error: {e}")
 
     def video_poll(self, task_id: str) -> dict:
+        """Poll video task status."""
         if not ZAI_AVAILABLE:
             raise RuntimeError("Video generation requires zai-sdk.")
         try:
@@ -359,9 +369,10 @@ class GeminiClient:
         self._available_models = None
         self._selected_model = None
         self._last_refresh = 0
-        self._refresh_interval = 3600
+        self._refresh_interval = 3600  # refresh model list every hour
 
     def _refresh_models(self):
+        """Refresh available Gemini models list."""
         now = time.time()
         if self._available_models is None or (now - self._last_refresh) > self._refresh_interval:
             try:
@@ -378,6 +389,7 @@ class GeminiClient:
                     self._available_models = []
 
     def _select_model(self) -> str:
+        """Select best available Gemini model."""
         self._refresh_models()
         preferred = [
             "gemini-2.0-flash-exp",
@@ -397,9 +409,11 @@ class GeminiClient:
         return available[0]
 
     def text(self, prompt: str, temperature: float = 0.1, language: str = None) -> str:
+        """Generate text with optional language hint."""
         if self._selected_model is None:
             self._selected_model = self._select_model()
 
+        # Determine target language
         if language is None:
             try:
                 from language_detector import detect_language
@@ -410,6 +424,7 @@ class GeminiClient:
         else:
             target_lang = language
 
+        # Add system instruction for language if needed
         if target_lang == 'hinglish':
             system_msg = "Respond in Hinglish (mix of Hindi and English)."
         elif target_lang != 'en':
@@ -455,6 +470,7 @@ class GeminiClient:
 # ----------------------------------------------------------------------
 # Async Task Queue (with concurrency control and SQLite persistence)
 # ----------------------------------------------------------------------
+# Semaphores for async tasks per model
 _async_semaphores = {}
 _async_lock = threading.Lock()
 
@@ -476,6 +492,7 @@ if ZAI_AVAILABLE and ZHIPU_AVAILABLE:
             self._start_poller()
 
         def _init_db(self):
+            """Create tasks table if not exists."""
             try:
                 self.conn.execute("""
                     CREATE TABLE IF NOT EXISTS tasks (
@@ -496,6 +513,7 @@ if ZAI_AVAILABLE and ZHIPU_AVAILABLE:
                 raise
 
         def add_task(self, task_id: str, variant: str, model: str):
+            """Insert a new task record."""
             with self.lock:
                 self.conn.execute(
                     "INSERT INTO tasks VALUES (?,?,?,?,?,?,?,?,?)",
@@ -504,6 +522,7 @@ if ZAI_AVAILABLE and ZHIPU_AVAILABLE:
                 self.conn.commit()
 
         def update_task(self, task_id: str, **kwargs):
+            """Update task fields."""
             with self.lock:
                 fields = ", ".join([f"{k}=?" for k in kwargs])
                 values = list(kwargs.values()) + [task_id]
@@ -511,6 +530,7 @@ if ZAI_AVAILABLE and ZHIPU_AVAILABLE:
                 self.conn.commit()
 
         def get_task(self, task_id: str) -> Optional[Dict[str, Any]]:
+            """Retrieve a task by ID."""
             cursor = self.conn.execute("SELECT * FROM tasks WHERE task_id=?", (task_id,))
             row = cursor.fetchone()
             if not row:
@@ -528,6 +548,7 @@ if ZAI_AVAILABLE and ZHIPU_AVAILABLE:
             }
 
         def get_active_tasks(self) -> List[Tuple[str, str, str, int]]:
+            """Return list of active (not completed/failed) tasks."""
             cursor = self.conn.execute(
                 "SELECT task_id, variant, status, progress FROM tasks WHERE status IN ('submitted','pending','processing') ORDER BY created_at"
             )
@@ -559,6 +580,7 @@ if ZAI_AVAILABLE and ZHIPU_AVAILABLE:
             return local_id
 
         def _poll_tasks(self):
+            """Background thread that polls all pending tasks."""
             from config import TASK_POLL_INTERVAL
             while True:
                 tasks = []
@@ -603,9 +625,11 @@ else:
     _task_queue = _DummyQueue()
 
 def get_active_tasks() -> List[Tuple[str, str, str, int]]:
+    """Return list of active async tasks."""
     return _task_queue.get_active_tasks()
 
 def get_task_status(task_id: str) -> Optional[Dict[str, Any]]:
+    """Return status of a specific task."""
     return _task_queue.get_task(task_id)
 
 # ----------------------------------------------------------------------
@@ -623,6 +647,7 @@ for service, models in SERVICES.items():
     }
 
 class YuktiModel:
+    """Wrapper for a service that can invoke its models with fallback and concurrency control."""
     def __init__(self, service: str):
         self.service = service
         if service not in SERVICES:
@@ -633,6 +658,10 @@ class YuktiModel:
         self.gemini_api_key = get_google_api_key()
 
     def invoke(self, prompt: str, **kwargs) -> Any:
+        """
+        Invoke the service with fallback over its model list.
+        Extra kwargs (e.g., language) are passed to the underlying model.
+        """
         last_error = None
         for model_key in SERVICES[self.service]:
             if not concurrency.can_use(model_key):
@@ -665,7 +694,7 @@ class YuktiModel:
         elif model_id in ["cogview-3-flash", "cogview-4"]:
             return client.image(model_id, prompt)
         elif model_id in ["cogvideox-3", "cogvideox-flash"]:
-            # Remove 'language' from kwargs to avoid duplicate in submit_async
+            # IMPORTANT FIX: pop 'language' to avoid duplicate argument
             lang = kwargs.pop('language', None)
             return _task_queue.submit_async(
                 variant=self.service,
@@ -688,9 +717,11 @@ class YuktiModel:
                            language=kwargs.get("language"))
 
 def load_model(service: str) -> YuktiModel:
+    """Return a YuktiModel instance for the given service."""
     return YuktiModel(service)
 
 def get_available_models() -> List[str]:
+    """Return list of service names that are currently available (based on API keys)."""
     available = []
     for service in SERVICES:
         if service in ["Yukti‑Flash", "Yukti‑Quantum", "Yukti‑Image", "Yukti‑Video", "Yukti‑Audio"]:
@@ -702,11 +733,13 @@ def get_available_models() -> List[str]:
     return available
 
 def get_service_config(service: str) -> Optional[Dict[str, Any]]:
+    """Return configuration for a service."""
     if service in SERVICES:
         return {"models": SERVICES[service]}
     return None
 
 def get_model_config(service: str) -> Optional[Dict[str, Any]]:
+    """Return configuration for the primary model of a service."""
     if service not in SERVICES:
         return None
     first_model = SERVICES[service][0]
@@ -715,6 +748,9 @@ def get_model_config(service: str) -> Optional[Dict[str, Any]]:
     config['model_key'] = first_model
     return config
 
+# ----------------------------------------------------------------------
+# Exported symbols
+# ----------------------------------------------------------------------
 __all__ = [
     "get_available_models",
     "get_service_config",

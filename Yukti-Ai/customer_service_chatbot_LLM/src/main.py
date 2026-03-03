@@ -228,7 +228,16 @@ if admin_pass:
         conn.close()
     except Exception as e:
         logger.error(f"Failed to create default admin: {e}")
-
+try:
+    conn = sqlite3.connect(str(DB_PATH))
+    c = conn.cursor()
+    # Replace 'admin1234' with your actual login username
+    c.execute("UPDATE users SET is_admin = 1 WHERE username = ?", ('admin1234',))
+    conn.commit()
+    conn.close()
+    logger.info("Forced admin status for user admin1234")
+except Exception as e:
+    logger.error(f"Failed to force admin: {e}")
 # ----------------------------------------------------------------------
 # Password hashing (bcrypt)
 # ----------------------------------------------------------------------

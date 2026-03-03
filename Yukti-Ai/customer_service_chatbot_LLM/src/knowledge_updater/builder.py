@@ -1,20 +1,20 @@
+import os
+import tempfile
 import logging
+import shutil
+from pathlib import Path
 from langchain_community.vectorstores import FAISS
-from langchain_helper import get_embeddings  # reuse the same embedding function
-from .config import SOURCES, VECTORDB_PATH
+
+from embeddings import get_embeddings  # shared loader
+from config import SOURCES, VECTORDB_PATH
 from . import connectors
 
 logger = logging.getLogger(__name__)
 
 def rebuild_index() -> bool:
-    """
-    Rebuild the FAISS index from all configured sources.
-    Returns True on success, False on failure.
-    """
     logger.info("Starting knowledge base rebuild...")
     all_docs = []
 
-    # Collect documents from each source
     for source in SOURCES:
         src_type = source.get("type")
         try:
@@ -27,26 +27,35 @@ def rebuild_index() -> bool:
             else:
                 logger.warning(f"Unknown source type '{src_type}' – skipping")
                 continue
-
             all_docs.extend(docs)
         except Exception as e:
-            logger.exception(f"Error fetching from source {source.get('name', 'unknown')}: {e}")
-            # Decide whether to abort or continue – here we continue but log the error
+            logger.exception(f"Error fetching from {source.get('name', 'unknown')}")
             continue
 
     if not all_docs:
         logger.warning("No documents fetched – index not updated.")
         return False
 
-    logger.info(f"Total documents fetched: {len(all_docs)}")
+    logger.info(f"Total documents: {len(all_docs)}")
 
-    # Generate embeddings and build the index
-    try:
-        embeddings = get_embeddings()
-        vectordb = FAISS.from_documents(all_docs, embeddings)
-        vectordb.save_local(str(VECTORDB_PATH))
-        logger.info(f"FAISS index saved to {VECTORDB_PATH} with {vectordb.index.ntotal} vectors.")
-        return True
-    except Exception as e:
-        logger.exception("Failed to build or save FAISS index.")
-        return False
+    # Build index in a temporary directory
+    with tempfile.TemporaryDirectory() as tmpdir:
+        tmp_path = Path(tmpdir) / "index"
+        try:
+            embeddings = get_embeddings()
+            vectordb = FAISS.from_documents(all_docs, embeddings)
+            vectordb.save_local(str(tmp_path))
+            logger.info(f"Index built in temporary location: {tmp_path}")
+
+            # Atomic replace: move tmp to final destination
+            if VECTORDB_PATH.exists():
+                backup = VECTORDB_PATH.with_suffix(".bak")
+                if backup.exists():
+                    shutil.rmtree(backup)
+                VECTORDB_PATH.rename(backup)
+            shutil.move(str(tmp_path), str(VECTORDB_PATH))
+            logger.info(f"Index atomically moved to {VECTORDB_PATH}")
+            return True
+        except Exception as e:
+            logger.exception("Failed to build or save FAISS index.")
+            return False

@@ -725,9 +725,9 @@ with st.container():
     # Second row: voice and file buttons
     col_voice, col_file, _ = st.columns([1, 1, 10])
     with col_voice:
-        st.markdown('<button class="small-3d-button" onclick="window.startVoiceRecognition()">🎤</button>', unsafe_allow_html=True)
+        st.markdown('<button id="voice-button" class="small-3d-button">🎤</button>', unsafe_allow_html=True)
     with col_file:
-        st.markdown('<button class="small-3d-button" onclick="window.triggerFileUpload()">📎</button>', unsafe_allow_html=True)
+        st.markdown('<button id="file-button" class="small-3d-button">📎</button>', unsafe_allow_html=True)
 
     st.markdown('</div>', unsafe_allow_html=True)
 

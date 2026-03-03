@@ -1,9 +1,9 @@
 """
-Original WhatsApp‑style chat interface (restored) with all fixes:
-- Input clearing via flag (no widget modification error)
-- get_active_tasks imported
-- Robust JavaScript for voice/file
-- Detailed KB diagnostics
+WhatsApp‑style chat interface with:
+- Fixed input bar at bottom
+- Voice & file buttons below input (two small bars)
+- Send button to submit (no Enter key submission)
+- Current timestamps, auto‑scroll, history preserved
 """
 
 import os
@@ -47,7 +47,7 @@ try:
         get_available_models,
         MODELS,
         get_task_status,
-        get_active_tasks,   # <-- FIX: added missing import
+        get_active_tasks,
         ZHIPU_AVAILABLE,
         load_model,
     )
@@ -97,7 +97,7 @@ st.markdown("""
     #MainMenu {visibility: hidden;}
     footer {visibility: hidden;}
     .main > div {
-        padding-bottom: 80px !important;
+        padding-bottom: 130px !important;  /* room for input bar + buttons */
     }
     .stChatMessage {
         padding: 0.5rem 1rem;
@@ -127,7 +127,8 @@ st.markdown("""
         margin-top: 0.2rem;
         text-align: right;
     }
-    .chat-input-container {
+    /* Fixed input area container */
+    .fixed-bottom-bar {
         position: fixed;
         bottom: 0;
         left: 0;
@@ -135,26 +136,38 @@ st.markdown("""
         background: #1f2c33;
         border-top: 1px solid #2a3942;
         padding: 0.5rem 1rem;
-        display: flex;
-        align-items: center;
-        gap: 10px;
         z-index: 100;
-        margin-left: 21rem;
+        margin-left: 21rem; /* sidebar width */
     }
     @media (max-width: 992px) {
-        .chat-input-container {
+        .fixed-bottom-bar {
             margin-left: 0;
         }
     }
-    .chat-bar-button {
+    /* Input row (text input + send button) */
+    .input-row {
+        display: flex;
+        gap: 10px;
+        align-items: center;
+        margin-bottom: 8px;
+    }
+    /* Button row (voice + file) */
+    .button-row {
+        display: flex;
+        gap: 15px;
+        justify-content: flex-start;
+        margin-top: 5px;
+    }
+    /* Small 3D buttons */
+    .small-3d-button {
         background: #2a3942;
         border: none;
         border-radius: 50%;
-        width: 40px;
-        height: 40px;
+        width: 36px;
+        height: 36px;
         color: #8696a0;
-        font-size: 1.3rem;
-        display: flex;
+        font-size: 1.1rem;
+        display: inline-flex;
         align-items: center;
         justify-content: center;
         cursor: pointer;
@@ -163,14 +176,45 @@ st.markdown("""
         border: none;
         outline: none;
     }
-    .chat-bar-button:hover {
+    .small-3d-button:hover {
         background: #3b4a54;
         color: #e9edef;
         transform: scale(1.05);
     }
-    .chat-bar-button:active {
+    .small-3d-button:active {
         transform: scale(0.95);
     }
+    /* Send button (larger, with icon) */
+    .send-button {
+        background: #00a884;
+        border: none;
+        border-radius: 50%;
+        width: 42px;
+        height: 42px;
+        color: white;
+        font-size: 1.2rem;
+        display: inline-flex;
+        align-items: center;
+        justify-content: center;
+        cursor: pointer;
+        transition: all 0.2s;
+        box-shadow: 0 2px 5px rgba(0,0,0,0.3);
+        border: none;
+        outline: none;
+    }
+    .send-button:hover {
+        background: #00bd8a;
+        transform: scale(1.05);
+    }
+    .send-button:active {
+        transform: scale(0.95);
+    }
+    .send-button:disabled {
+        background: #2a3942;
+        cursor: not-allowed;
+        opacity: 0.6;
+    }
+    /* Text input */
     .stTextInput > div > input {
         background: #2a3942;
         border: none;
@@ -187,13 +231,16 @@ st.markdown("""
     .stTextInput > label {
         display: none;
     }
+    /* Video container */
     .stVideo {
         margin: 0.5rem 0;
     }
+    /* Sidebar styling */
     .css-1d391kg {
         background: #1f2c33;
         border-right: 1px solid #2a3942;
     }
+    /* Hide default chat input */
     .stChatInput {
         display: none !important;
     }
@@ -245,12 +292,11 @@ if "conversation_language" not in st.session_state:
 if "uploaded_file" not in st.session_state:
     st.session_state.uploaded_file = None
 
-# Flag to clear input on next run (FIX)
-if "clear_input" not in st.session_state:
-    st.session_state.clear_input = False
+if "processing" not in st.session_state:
+    st.session_state.processing = False  # to disable send button while generating
 
 # ----------------------------------------------------------------------
-# JavaScript for voice and file input (robust, waits for DOM)
+# JavaScript for voice and file input (robust)
 # ----------------------------------------------------------------------
 st.markdown("""
 <script>
@@ -340,7 +386,7 @@ if file_receiver and not st.session_state.uploaded_file:
         st.session_state.uploaded_file = None
 
 # ----------------------------------------------------------------------
-# Sidebar
+# Sidebar (unchanged)
 # ----------------------------------------------------------------------
 with st.sidebar:
     st.markdown("## 🧠 Model")
@@ -408,7 +454,7 @@ with st.sidebar:
         if st.button("⟳ Refresh Tasks", use_container_width=True):
             st.rerun()
         try:
-            active_tasks = get_active_tasks()   # <-- now works because imported
+            active_tasks = get_active_tasks()
             for task_id, variant, status, progress in active_tasks:
                 if task_id not in st.session_state.tasks:
                     st.session_state.tasks[task_id] = {
@@ -449,25 +495,24 @@ with st.sidebar:
         st.rerun()
 
 # ----------------------------------------------------------------------
-# Custom chat input bar
+# Display all messages (auto‑scroll via JavaScript)
 # ----------------------------------------------------------------------
-cols = st.columns([1, 1, 8])
-with cols[0]:
-    st.markdown('<button class="chat-bar-button" onclick="window.startVoiceRecognition()">🎤</button>', unsafe_allow_html=True)
-with cols[1]:
-    st.markdown('<button class="chat-bar-button" onclick="window.triggerFileUpload()">📎</button>', unsafe_allow_html=True)
-with cols[2]:
-    # Handle input clearing correctly (FIX)
-    if st.session_state.clear_input:
-        default_value = ""
-        st.session_state.clear_input = False
-    else:
-        default_value = None
-    prompt = st.text_input("Message", key="message_input", value=default_value, label_visibility="collapsed", placeholder="Type a message")
+# We'll inject a small script to scroll to bottom after each update
+st.markdown("""
+<script>
+function scrollToBottom() {
+    const chatContainer = window.parent.document.querySelector('.main > div');
+    if (chatContainer) {
+        chatContainer.scrollTop = chatContainer.scrollHeight;
+    }
+}
+// Scroll on load and after each Streamlit update
+scrollToBottom();
+const observer = new MutationObserver(scrollToBottom);
+observer.observe(window.parent.document.querySelector('.main > div'), { childList: true, subtree: true });
+</script>
+""", unsafe_allow_html=True)
 
-# ----------------------------------------------------------------------
-# Display all messages
-# ----------------------------------------------------------------------
 for msg in st.session_state.messages:
     with st.chat_message(msg["role"]):
         st.markdown(msg["content"])
@@ -483,12 +528,45 @@ for msg in st.session_state.messages:
             st.markdown(f"<div class='message-timestamp'>{msg['timestamp']}</div>", unsafe_allow_html=True)
 
 # ----------------------------------------------------------------------
-# Process user message when Enter is pressed
+# Fixed bottom bar with input, send button, and voice/file buttons
 # ----------------------------------------------------------------------
-if prompt and prompt.strip():
-    current_prompt = prompt
-    # Set flag to clear input on next run (FIX)
-    st.session_state.clear_input = True
+with st.container():
+    st.markdown('<div class="fixed-bottom-bar">', unsafe_allow_html=True)
+
+    # First row: text input + send button
+    col1, col2 = st.columns([8, 1])
+    with col1:
+        message_input = st.text_input(
+            "Message",
+            key="message_input",
+            label_visibility="collapsed",
+            placeholder="Type a message",
+            disabled=st.session_state.processing
+        )
+    with col2:
+        send_clicked = st.button(
+            "➤",  # paper plane icon
+            key="send_button",
+            disabled=st.session_state.processing or not message_input,
+            help="Send message"
+        )
+
+    # Second row: voice and file buttons
+    col_voice, col_file, _ = st.columns([1, 1, 10])
+    with col_voice:
+        st.markdown('<button class="small-3d-button" onclick="window.startVoiceRecognition()">🎤</button>', unsafe_allow_html=True)
+    with col_file:
+        st.markdown('<button class="small-3d-button" onclick="window.triggerFileUpload()">📎</button>', unsafe_allow_html=True)
+
+    st.markdown('</div>', unsafe_allow_html=True)
+
+# ----------------------------------------------------------------------
+# Process user message when send button is clicked
+# ----------------------------------------------------------------------
+if send_clicked and message_input and not st.session_state.processing:
+    # Lock UI
+    st.session_state.processing = True
+    current_prompt = message_input
 
     uploaded_file_obj = None
     if st.session_state.uploaded_file:
@@ -513,7 +591,7 @@ if prompt and prompt.strip():
     elif st.session_state.conversation_language is None:
         st.session_state.conversation_language = target_lang
 
-    # Add user message
+    # Add user message with current timestamp
     timestamp = datetime.now().strftime("%H:%M")
     st.session_state.messages.append({
         "role": "user",
@@ -619,24 +697,29 @@ if prompt and prompt.strip():
             logger.exception("Fatal error in message processing")
             full_response = ""
 
+    # Append assistant message with current timestamp
     if result and result.get("type") == "sync" and full_response:
+        timestamp_assistant = datetime.now().strftime("%H:%M")
         st.session_state.messages.append({
             "role": "assistant",
             "content": full_response,
             "media": media,
-            "timestamp": datetime.now().strftime("%H:%M")
+            "timestamp": timestamp_assistant
         })
         if DATABASE_AVAILABLE:
-            save_message("assistant", full_response, datetime.now().strftime("%H:%M"))
+            save_message("assistant", full_response, timestamp_assistant)
     elif result and result.get("type") == "async":
+        timestamp_assistant = datetime.now().strftime("%H:%M")
         st.session_state.messages.append({
             "role": "assistant",
             "content": full_response,
-            "timestamp": datetime.now().strftime("%H:%M")
+            "timestamp": timestamp_assistant
         })
         if DATABASE_AVAILABLE:
-            save_message("assistant", full_response, datetime.now().strftime("%H:%M"))
+            save_message("assistant", full_response, timestamp_assistant)
 
+    # Unlock UI and rerun to reflect changes
+    st.session_state.processing = False
     st.rerun()
 
 # ----------------------------------------------------------------------

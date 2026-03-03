@@ -9,6 +9,13 @@ logger = logging.getLogger(__name__)
 # ----------------------------------------------------------------------
 # CSV Connector – robust encoding fallback and error handling
 # ----------------------------------------------------------------------
+def fetch_rss(source: Dict[str, Any]) -> List[Document]:
+    """Fetch and parse an RSS feed."""
+    raise NotImplementedError("RSS connector not implemented yet. Please configure another source type.")
+
+def fetch_api(source: Dict[str, Any]) -> List[Document]:
+    """Fetch data from a REST API."""
+    raise NotImplementedError("API connector not implemented yet. Please configure another source type.")
 def fetch_csv(source: Dict[str, Any]) -> List[Document]:
     """
     Reads a CSV file and converts each row into a LangChain Document.

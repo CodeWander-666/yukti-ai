@@ -1,6 +1,6 @@
 """
-Original WhatsApp‑style chat interface (restored) with detailed knowledge base error reporting.
-Only additions: input clearing flag and KB diagnostics.
+Original WhatsApp‑style chat interface (restored) with database persistence,
+visible sidebar toggle, and detailed knowledge base error reporting.
 """
 
 import os
@@ -58,6 +58,16 @@ except ImportError as e:
     def detect_language(text):
         return {"language": "en", "method": "fallback", "explicit_instruction": None}
 
+# Import database for chat persistence (if available)
+try:
+    from database import save_message, load_messages
+    DATABASE_AVAILABLE = True
+except ImportError:
+    DATABASE_AVAILABLE = False
+    logging.warning("database.py not found; chat persistence disabled.")
+    def save_message(role, content, timestamp): pass
+    def load_messages(): return []
+
 # Configure logging
 logging.basicConfig(level=logging.INFO, format='%(asctime)s - %(name)s - %(levelname)s - %(message)s')
 logger = logging.getLogger(__name__)
@@ -73,19 +83,22 @@ st.set_page_config(
 )
 
 # ----------------------------------------------------------------------
-# WhatsApp‑style CSS (unchanged, working version)
+# WhatsApp‑style CSS (header is NOT hidden – sidebar toggle visible)
 # ----------------------------------------------------------------------
 st.markdown("""
 <style>
     .stApp {
         background: #0b141a;
     }
+    /* Keep the Streamlit header visible for sidebar toggle */
+    /* Only hide the default menu and footer */
     #MainMenu {visibility: hidden;}
     footer {visibility: hidden;}
-    header {visibility: hidden;}
+    /* Main content area – make room for fixed input bar */
     .main > div {
         padding-bottom: 80px !important;
     }
+    /* Chat message container */
     .stChatMessage {
         padding: 0.5rem 1rem;
         margin-bottom: 0.5rem;
@@ -95,6 +108,7 @@ st.markdown("""
         box-shadow: 0 1px 2px rgba(0,0,0,0.1);
         position: relative;
     }
+    /* User message (right side) */
     .stChatMessage[data-testid="user-message"] {
         background: #005c4b;
         color: white;
@@ -102,18 +116,21 @@ st.markdown("""
         margin-left: auto;
         border-bottom-right-radius: 4px;
     }
+    /* Assistant message (left side) */
     .stChatMessage[data-testid="assistant-message"] {
         background: #202c33;
         color: #e9edef;
         align-self: flex-start;
         border-bottom-left-radius: 4px;
     }
+    /* Timestamp */
     .message-timestamp {
         font-size: 0.7rem;
         color: rgba(255,255,255,0.6);
         margin-top: 0.2rem;
         text-align: right;
     }
+    /* Chat input bar container – fixed at bottom */
     .chat-input-container {
         position: fixed;
         bottom: 0;
@@ -126,13 +143,14 @@ st.markdown("""
         align-items: center;
         gap: 10px;
         z-index: 100;
-        margin-left: 21rem;
+        margin-left: 21rem; /* sidebar width */
     }
     @media (max-width: 992px) {
         .chat-input-container {
             margin-left: 0;
         }
     }
+    /* 3D buttons */
     .chat-bar-button {
         background: #2a3942;
         border: none;
@@ -158,6 +176,7 @@ st.markdown("""
     .chat-bar-button:active {
         transform: scale(0.95);
     }
+    /* Text input */
     .stTextInput > div > input {
         background: #2a3942;
         border: none;
@@ -171,16 +190,20 @@ st.markdown("""
         outline: none;
         box-shadow: 0 0 0 2px #00a884;
     }
+    /* Hide Streamlit input label */
     .stTextInput > label {
         display: none;
     }
+    /* Video container */
     .stVideo {
         margin: 0.5rem 0;
     }
+    /* Sidebar styling */
     .css-1d391kg {
         background: #1f2c33;
         border-right: 1px solid #2a3942;
     }
+    /* Hide default chat input (we use custom) */
     .stChatInput {
         display: none !important;
     }
@@ -209,9 +232,17 @@ st.markdown("""
 # Session state initialization
 # ----------------------------------------------------------------------
 if "messages" not in st.session_state:
-    st.session_state.messages = [
-        {"role": "assistant", "content": "Hello! I'm Yukti AI. How can I help you today?", "timestamp": datetime.now().strftime("%H:%M")}
-    ]
+    # Load from database if available
+    if DATABASE_AVAILABLE:
+        st.session_state.messages = load_messages()
+        if not st.session_state.messages:
+            st.session_state.messages = [
+                {"role": "assistant", "content": "Hello! I'm Yukti AI. How can I help you today?", "timestamp": datetime.now().strftime("%H:%M")}
+            ]
+    else:
+        st.session_state.messages = [
+            {"role": "assistant", "content": "Hello! I'm Yukti AI. How can I help you today?", "timestamp": datetime.now().strftime("%H:%M")}
+        ]
 
 if "kb_status" not in st.session_state:
     st.session_state.kb_status = get_kb_detailed_status()
@@ -320,7 +351,7 @@ if file_receiver and not st.session_state.uploaded_file:
         st.session_state.uploaded_file = None
 
 # ----------------------------------------------------------------------
-# Sidebar
+# Sidebar (with knowledge base diagnostics and task list)
 # ----------------------------------------------------------------------
 with st.sidebar:
     st.markdown("## 🧠 Model")
@@ -498,11 +529,14 @@ if prompt and prompt.strip():
         st.session_state.conversation_language = target_lang
 
     # Add user message
+    timestamp = datetime.now().strftime("%H:%M")
     st.session_state.messages.append({
         "role": "user",
         "content": current_prompt,
-        "timestamp": datetime.now().strftime("%H:%M")
+        "timestamp": timestamp
     })
+    if DATABASE_AVAILABLE:
+        save_message("user", current_prompt, timestamp)
 
     # Generate assistant response
     with st.chat_message("assistant"):
@@ -600,6 +634,7 @@ if prompt and prompt.strip():
             logger.exception("Fatal error in message processing")
             full_response = ""
 
+    # Append assistant message
     if result and result.get("type") == "sync" and full_response:
         st.session_state.messages.append({
             "role": "assistant",
@@ -607,12 +642,16 @@ if prompt and prompt.strip():
             "media": media,
             "timestamp": datetime.now().strftime("%H:%M")
         })
+        if DATABASE_AVAILABLE:
+            save_message("assistant", full_response, datetime.now().strftime("%H:%M"))
     elif result and result.get("type") == "async":
         st.session_state.messages.append({
             "role": "assistant",
             "content": full_response,
             "timestamp": datetime.now().strftime("%H:%M")
         })
+        if DATABASE_AVAILABLE:
+            save_message("assistant", full_response, datetime.now().strftime("%H:%M"))
 
     st.rerun()
 

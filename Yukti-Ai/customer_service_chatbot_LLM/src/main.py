@@ -68,7 +68,7 @@ st.set_page_config(
 )
 
 # ----------------------------------------------------------------------
-# WhatsApp‑style CSS (clean, modern)
+# WhatsApp‑style CSS
 # ----------------------------------------------------------------------
 st.markdown("""
 <style>
@@ -80,6 +80,10 @@ st.markdown("""
     #MainMenu {visibility: hidden;}
     footer {visibility: hidden;}
     header {visibility: hidden;}
+    /* Main content area – make room for fixed input bar */
+    .main > div {
+        padding-bottom: 80px !important;
+    }
     /* Chat message container */
     .stChatMessage {
         padding: 0.5rem 1rem;
@@ -125,7 +129,7 @@ st.markdown("""
         align-items: center;
         gap: 10px;
         z-index: 100;
-        margin-left: 21rem; /* adjust based on sidebar width */
+        margin-left: 21rem; /* sidebar width */
     }
     @media (max-width: 992px) {
         .chat-input-container {
@@ -193,7 +197,7 @@ st.markdown("""
 """, unsafe_allow_html=True)
 
 # ----------------------------------------------------------------------
-# Custom title (subtle)
+# Custom title
 # ----------------------------------------------------------------------
 st.markdown("""
 <div style="display: flex; align-items: center; justify-content: center; gap: 5px; margin-bottom: 10px;">
@@ -233,6 +237,10 @@ if "conversation_language" not in st.session_state:
 
 if "uploaded_file" not in st.session_state:
     st.session_state.uploaded_file = None  # (filename, bytes)
+
+# Flag to clear input on next run
+if "clear_input" not in st.session_state:
+    st.session_state.clear_input = False
 
 # ----------------------------------------------------------------------
 # Sidebar (simplified, no task list)
@@ -298,20 +306,29 @@ if file_receiver and not st.session_state.uploaded_file:
         st.session_state.uploaded_file = None
 
 # ----------------------------------------------------------------------
-# JavaScript for voice and file input
+# JavaScript for voice and file input (runs after DOM ready)
 # ----------------------------------------------------------------------
 st.markdown("""
 <script>
-// Global variables
-let fileInput = null;
+// Wait for Streamlit to finish rendering
+function waitForStreamlit() {
+    if (window.parent.document.querySelector('input[data-testid="stTextInput"]')) {
+        initializeFeatures();
+    } else {
+        setTimeout(waitForStreamlit, 100);
+    }
+}
 
-// Create hidden file input when page loads
-(function() {
-    fileInput = document.createElement('input');
-    fileInput.type = 'file';
-    fileInput.id = 'hidden-file-input';
-    fileInput.style.display = 'none';
-    document.body.appendChild(fileInput);
+function initializeFeatures() {
+    // Create hidden file input
+    let fileInput = document.getElementById('hidden-file-input');
+    if (!fileInput) {
+        fileInput = document.createElement('input');
+        fileInput.type = 'file';
+        fileInput.id = 'hidden-file-input';
+        fileInput.style.display = 'none';
+        document.body.appendChild(fileInput);
+    }
 
     // Handle file selection
     fileInput.addEventListener('change', function(e) {
@@ -320,68 +337,76 @@ let fileInput = null;
             const reader = new FileReader();
             reader.onload = function(ev) {
                 const data = ev.target.result; // base64
-                // Send to Streamlit via the hidden text input
+                // Find the hidden receiver input
                 const fileReceiver = window.parent.document.querySelector('input[data-testid="stTextInput"][aria-label="file_receiver"]');
                 if (fileReceiver) {
                     fileReceiver.value = file.name + ',' + data.split(',')[1];
-                    // Trigger input event to update Streamlit state
                     fileReceiver.dispatchEvent(new Event('input', { bubbles: true }));
                 }
             };
             reader.readAsDataURL(file);
         }
     });
-})();
 
-// Voice recognition function
-window.startVoiceRecognition = function() {
-    if (!('webkitSpeechRecognition' in window) && !('SpeechRecognition' in window)) {
-        alert('Voice recognition not supported in this browser. Please use Chrome or Edge.');
-        return;
-    }
-    const recognition = new (window.SpeechRecognition || window.webkitSpeechRecognition)();
-    recognition.lang = 'en-US';
-    recognition.interimResults = false;
-    recognition.maxAlternatives = 1;
-
-    recognition.start();
-
-    recognition.onresult = function(event) {
-        const transcript = event.results[0][0].transcript;
-        // Find the text input (our message input)
-        const textInput = window.parent.document.querySelector('input[data-testid="stTextInput"][aria-label="Message"]');
-        if (textInput) {
-            textInput.value = transcript;
-            textInput.dispatchEvent(new Event('input', { bubbles: true }));
+    // Voice recognition
+    window.startVoiceRecognition = function() {
+        if (!('webkitSpeechRecognition' in window) && !('SpeechRecognition' in window)) {
+            alert('Voice recognition not supported in this browser. Please use Chrome or Edge.');
+            return;
         }
+        const recognition = new (window.SpeechRecognition || window.webkitSpeechRecognition)();
+        recognition.lang = 'en-US';
+        recognition.interimResults = false;
+        recognition.maxAlternatives = 1;
+
+        recognition.start();
+
+        recognition.onresult = function(event) {
+            const transcript = event.results[0][0].transcript;
+            // Find the message input
+            const textInput = window.parent.document.querySelector('input[data-testid="stTextInput"][aria-label="Message"]');
+            if (textInput) {
+                textInput.value = transcript;
+                textInput.dispatchEvent(new Event('input', { bubbles: true }));
+            }
+        };
+
+        recognition.onerror = function(event) {
+            alert('Voice error: ' + event.error);
+        };
     };
 
-    recognition.onerror = function(event) {
-        alert('Voice error: ' + event.error);
+    // File upload trigger
+    window.triggerFileUpload = function() {
+        document.getElementById('hidden-file-input').click();
     };
-};
+}
 
-// File upload trigger
-window.triggerFileUpload = function() {
-    document.getElementById('hidden-file-input').click();
-};
+waitForStreamlit();
 </script>
 """, unsafe_allow_html=True)
 
 # ----------------------------------------------------------------------
 # Custom chat input bar (fixed at bottom)
 # ----------------------------------------------------------------------
-# We'll use columns to place the buttons and input
+# Use columns to place buttons and input
 cols = st.columns([1, 1, 8])
 with cols[0]:
     st.markdown('<button class="chat-bar-button" onclick="window.startVoiceRecognition()">🎤</button>', unsafe_allow_html=True)
 with cols[1]:
     st.markdown('<button class="chat-bar-button" onclick="window.triggerFileUpload()">📎</button>', unsafe_allow_html=True)
 with cols[2]:
-    prompt = st.text_input("Message", key="message_input", label_visibility="collapsed", placeholder="Type a message")
+    # Check if we need to clear the input on this run
+    if st.session_state.clear_input:
+        # Set a default value to force clear – Streamlit will render an empty input
+        default_value = ""
+        st.session_state.clear_input = False
+    else:
+        default_value = None
+    prompt = st.text_input("Message", key="message_input", value=default_value, label_visibility="collapsed", placeholder="Type a message")
 
 # ----------------------------------------------------------------------
-# Display all messages (with timestamps)
+# Display all messages
 # ----------------------------------------------------------------------
 for msg in st.session_state.messages:
     with st.chat_message(msg["role"]):
@@ -434,9 +459,9 @@ for msg in st.session_state.messages:
 # Process user message when Enter is pressed
 # ----------------------------------------------------------------------
 if prompt and prompt.strip():
-    # Clear the input immediately to prevent double-send
+    # Store current prompt and mark input to be cleared on next run
     current_prompt = prompt
-    st.session_state.message_input = ""
+    st.session_state.clear_input = True
 
     # Get uploaded file if any
     uploaded_file_obj = None
@@ -599,7 +624,7 @@ if prompt and prompt.strip():
             "timestamp": datetime.now().strftime("%H:%M")
         })
 
-    # Rerun to reflect new messages
+    # Rerun to reflect new messages and cleared input
     st.rerun()
 
 # ----------------------------------------------------------------------

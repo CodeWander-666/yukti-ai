@@ -1,28 +1,20 @@
-streamlit>=1.54.0
-pandas>=2.2.3,<3.0.0                 # Streamlit requires pandas <3
-python-dotenv>=1.2.1
-pillow>=11.0.0
-
-# LangChain ecosystem
-langchain>=1.2.10
-langchain-community>=0.4.1
-langchain-core>=1.2.16
-langchain-openai>=1.1.8               # Supports openai 2.x
-
-# OpenAI SDK (for Zhipu GLM‑5)
-openai>=2.20.0,<3.0.0
-
-# Google Gemini (raw SDK – used directly)
-google-genai>=1.65.0
-
-# Zhipu async video
-zai-sdk>=0.2.2
-
-# Vector search & embeddings
-faiss-cpu>=1.13.2
-sentence-transformers>=5.2.3
-
-# HTTP & utilities
-httpx>=0.28.0                          # No upper cap – let resolver decide
-requests>=2.32.5
-pydantic>=2.10.0,<3.0.0                # zai-sdk requires <3.0.0
+streamlit>=1.28.0
+langchain>=0.1.0
+langchain-community>=0.0.10
+langchain-openai>=0.0.2
+faiss-cpu>=1.7.4
+pandas>=2.0.0
+requests>=2.31.0
+python-dotenv>=1.0.0
+sentence-transformers>=2.2.2
+transformers>=4.35.0  # optional for language detection
+torch>=2.0.0          # for transformers
+fasttext>=0.9.2       # optional for language detection
+feedparser>=6.0.10    # for RSS connector
+bcrypt>=4.0.1         # for password hashing
+psutil>=5.9.5         # for system metrics
+plotly>=5.17.0        # for charts
+openpyxl>=3.1.2       # for Excel export
+xlsxwriter>=3.1.2     # for Excel export
+zai-sdk>=0.2.0        # for Zhipu video
+google-genai>=1.0.0    # for Gemini

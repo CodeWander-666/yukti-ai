@@ -3,7 +3,6 @@ Core reasoning engine – combines retrieval, emotion detection, language awaren
 and LLM invocation in a single call. Includes caching and comprehensive error handling.
 """
 
-import os
 import time
 import hashlib
 import logging
@@ -14,9 +13,9 @@ from langchain_core.documents import Document
 # Local imports
 from langchain_helper import retrieve_documents
 from model_manager import load_model, get_model_config
-from language_detector import detect_language
+from language_detector import detect_language, get_response_language
 from language_utils import get_language_name
-from config import CACHE_TTL
+from config import RETRIEVAL_CACHE_TTL
 
 logger = logging.getLogger(__name__)
 
@@ -38,7 +37,7 @@ def retrieve_cached(query: str, k: int = 3) -> List[Document]:
     cached = _retrieval_cache.get(cache_key)
     now = time.time()
 
-    if cached and (now - cached['timestamp']) < CACHE_TTL:
+    if cached and (now - cached['timestamp']) < RETRIEVAL_CACHE_TTL:
         logger.debug(f"Retrieval cache hit for query: {query[:50]}...")
         return cached['docs']
 
@@ -253,7 +252,7 @@ ANSWER:
             logger.exception("Fallback also failed")
             return {
                 "type": "sync",
-                "answer": f"Sorry, I couldn't generate an answer due to a technical issue.",
+                "answer": "Sorry, I couldn't generate an answer due to a technical issue.",
                 "monologue": "",
                 "sources": docs,
                 "thinking_time": time.time() - start_time,

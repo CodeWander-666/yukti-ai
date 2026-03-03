@@ -81,7 +81,7 @@ except ImportError:
     GEMINI_AVAILABLE = False
     MODELS = {}
     def get_available_models(): return []
-    def get_active_tasks(): return []
+    def get_active_tasks(user_id=None): return []  # updated to accept user_id
     def get_task_status(*args): return None
     def load_model(*args): return None
 
@@ -111,7 +111,7 @@ logger = logging.getLogger(__name__)
 st.set_page_config(page_title="Yukti AI", page_icon="🚀", layout="wide", initial_sidebar_state="expanded")
 
 # ----------------------------------------------------------------------
-# Database initialization
+# Database initialization (including tasks.user_id if not exists)
 # ----------------------------------------------------------------------
 def init_db():
     """Create all tables if they don't exist."""
@@ -190,7 +190,8 @@ def init_db():
             result_url TEXT,
             error TEXT,
             created_at TIMESTAMP,
-            completed_at TIMESTAMP
+            completed_at TIMESTAMP,
+            user_id INTEGER
         )''')
 
         # Indexes
@@ -201,6 +202,7 @@ def init_db():
         c.execute("CREATE INDEX IF NOT EXISTS idx_model_metrics_period ON model_metrics(model_key, period, period_start)")
         c.execute("CREATE INDEX IF NOT EXISTS idx_system_metrics_timestamp ON system_metrics(timestamp)")
         c.execute("CREATE INDEX IF NOT EXISTS idx_kb_metrics_timestamp ON kb_metrics(timestamp)")
+        c.execute("CREATE INDEX IF NOT EXISTS idx_tasks_user_id ON tasks(user_id)")
 
         conn.commit()
         conn.close()
@@ -236,7 +238,7 @@ def ensure_admin_user():
 ensure_admin_user()
 
 # ----------------------------------------------------------------------
-# Authentication helpers
+# Authentication helpers (unchanged)
 # ----------------------------------------------------------------------
 def authenticate(username: str, password: str) -> Tuple[bool, Optional[int], bool]:
     try:
@@ -297,7 +299,7 @@ def log_admin_action(admin_id: int, action: str, details: str = ""):
         logger.error(f"Failed to log admin action: {e}")
 
 # ----------------------------------------------------------------------
-# System metrics
+# System metrics (unchanged)
 # ----------------------------------------------------------------------
 try:
     import psutil
@@ -389,20 +391,24 @@ def get_user_message_counts():
         df = pd.read_sql_query(query, conn)
         conn.close()
 
-        # Add derived columns safely
         if not df.empty:
-            # Convert created_at and last_active to datetime for formatting
-            df['created_at'] = pd.to_datetime(df['created_at'])
-            df['last_active'] = pd.to_datetime(df['last_active'])
-            df['created_at'] = df['created_at'].dt.strftime('%Y-%m-%d %H:%M')
-            df['last_active'] = df['last_active'].dt.strftime('%Y-%m-%d %H:%M')
-            # Success rate
+            # Ensure numeric columns are truly numeric
+            numeric_cols = ['total_messages', 'successful', 'failed', 'avg_response_time']
+            for col in numeric_cols:
+                df[col] = pd.to_numeric(df[col], errors='coerce').fillna(0)
+
+            # Compute success rate (as float, not string yet)
             df['success_rate'] = (df['successful'] / df['total_messages'].replace(0, 1)) * 100
-            df['success_rate'] = df['success_rate'].round(1).astype(str) + '%'
-            # Avg response time
-            df['avg_response_time'] = df['avg_response_time'].round(0).fillna(0).astype(int)
+
+            # Convert timestamps to datetime then to strings for display
+            df['created_at'] = pd.to_datetime(df['created_at']).dt.strftime('%Y-%m-%d %H:%M')
+            df['last_active'] = pd.to_datetime(df['last_active']).dt.strftime('%Y-%m-%d %H:%M')
+
+            # Format avg_response_time as integer (still numeric, but we'll keep as int)
+            df['avg_response_time'] = df['avg_response_time'].round(0).astype(int)
+
+            # Keep success_rate as float for now; we'll format in display
         else:
-            # Empty dataframe with expected columns
             df = pd.DataFrame(columns=[
                 'id', 'username', 'is_admin', 'created_at', 'total_messages',
                 'successful', 'failed', 'avg_response_time', 'last_active',
@@ -543,16 +549,26 @@ def get_kb_history(days=30):
         logger.exception("Failed to get KB history")
         return pd.DataFrame(columns=["time", "doc_count", "index_size"])
 
-def get_task_history(limit=100):
+def get_task_history(user_id=None, limit=100):
     try:
         conn = sqlite3.connect(str(DB_PATH))
-        query = f"""
-            SELECT task_id, variant, model, status, progress, result_url, error, created_at, completed_at
-            FROM tasks
-            ORDER BY created_at DESC
-            LIMIT {limit}
-        """
-        df = pd.read_sql_query(query, conn)
+        if user_id is None:
+            query = f"""
+                SELECT task_id, variant, model, status, progress, result_url, error, created_at, completed_at
+                FROM tasks
+                ORDER BY created_at DESC
+                LIMIT {limit}
+            """
+            df = pd.read_sql_query(query, conn)
+        else:
+            query = f"""
+                SELECT task_id, variant, model, status, progress, result_url, error, created_at, completed_at
+                FROM tasks
+                WHERE user_id = ?
+                ORDER BY created_at DESC
+                LIMIT {limit}
+            """
+            df = pd.read_sql_query(query, conn, params=(user_id,))
         conn.close()
         return df
     except Exception as e:
@@ -593,7 +609,7 @@ if "logged_in" not in st.session_state:
     st.session_state.debug_mode = False       # global debug flag
 
 # ----------------------------------------------------------------------
-# Login / Signup UI
+# Login / Signup UI (unchanged)
 # ----------------------------------------------------------------------
 if not st.session_state.logged_in:
     st.title("Yukti AI")
@@ -697,7 +713,8 @@ with st.sidebar:
         if st.button("⟳ Refresh Tasks", use_container_width=True):
             st.rerun()
         try:
-            active_tasks = get_active_tasks()
+            # Pass current user_id to get only this user's tasks
+            active_tasks = get_active_tasks(st.session_state.user_id)
             for task_id, variant, status, progress in active_tasks:
                 if task_id not in st.session_state.tasks:
                     st.session_state.tasks[task_id] = {"variant": variant, "status": status, "progress": progress}
@@ -751,7 +768,7 @@ if st.session_state.admin_mode:
         with col2:
             st.metric("KB Docs", get_document_count() or 0)
         with col3:
-            st.metric("Active Tasks", len(get_active_tasks()))
+            st.metric("Active Tasks", len(get_active_tasks(st.session_state.user_id)))
         with col4:
             if VECTORDB_PATH.exists():
                 mtime = datetime.fromtimestamp(VECTORDB_PATH.stat().st_mtime)
@@ -811,6 +828,9 @@ if st.session_state.admin_mode:
                     display_columns.append(col)
 
             display_df = users_df[display_columns].copy()
+            # Format success_rate as percentage string for display
+            if 'success_rate' in display_df.columns:
+                display_df['success_rate'] = display_df['success_rate'].round(1).astype(str) + '%'
             # Rename for display
             rename_map = {
                 'username': 'Username',
@@ -860,14 +880,13 @@ if st.session_state.admin_mode:
                             else:
                                 st.error(msg)
 
-    # ----- Analytics Tab -----
+    # ----- Analytics Tab (unchanged, but uses updated functions) -----
     with tabs[2]:
         st.subheader("Model Performance")
         perf = get_model_performance(30)
         if perf.empty:
             st.info("📉 No model performance data yet. Start chatting to see metrics.")
         else:
-            # Check required columns
             if 'day' in perf.columns and 'requests' in perf.columns and 'model_key' in perf.columns:
                 fig1 = px.line(perf, x="day", y="requests", color="model_key", title="Daily Requests")
                 st.plotly_chart(fig1, use_container_width=True)
@@ -899,7 +918,7 @@ if st.session_state.admin_mode:
                 fig6 = px.line(sys_hist, x="time", y=["cpu", "memory", "disk"], title="System Resources")
                 st.plotly_chart(fig6, use_container_width=True)
 
-    # ----- Knowledge Base Tab -----
+    # ----- Knowledge Base Tab (unchanged) -----
     with tabs[3]:
         st.subheader("Knowledge Base")
         col1, col2 = st.columns(2)
@@ -933,7 +952,7 @@ if st.session_state.admin_mode:
     # ----- Tasks Tab -----
     with tabs[4]:
         st.subheader("Active Tasks")
-        active = get_active_tasks()
+        active = get_active_tasks(st.session_state.user_id)
         if active:
             for task_id, variant, status, prog in active:
                 cols = st.columns([2,2,2,2])
@@ -947,13 +966,13 @@ if st.session_state.admin_mode:
         else:
             st.info("⏳ No active tasks.")
         st.subheader("Task History")
-        hist = get_task_history(100)
+        hist = get_task_history(user_id=st.session_state.user_id, limit=100)
         if hist.empty:
             st.info("📋 No task history yet.")
         else:
             st.dataframe(hist, use_container_width=True)
 
-    # ----- Insights Tab -----
+    # ----- Insights Tab (unchanged) -----
     with tabs[5]:
         st.subheader("AI Insights")
         perf = get_model_performance(1)
@@ -990,7 +1009,7 @@ if st.session_state.admin_mode:
         else:
             st.success("✅ All systems nominal")
 
-    # ----- System Tab -----
+    # ----- System Tab (unchanged) -----
     with tabs[6]:
         st.subheader("System Control")
         if st.button("📥 Export Analytics"):
@@ -1001,7 +1020,7 @@ if st.session_state.admin_mode:
                 get_user_activity_summary(30).to_excel(w, sheet_name="Activity")
                 get_system_metrics_history(24).to_excel(w, sheet_name="System")
                 get_kb_history(30).to_excel(w, sheet_name="KB")
-                get_task_history(100).to_excel(w, sheet_name="Tasks")
+                get_task_history(user_id=None, limit=100).to_excel(w, sheet_name="Tasks")  # admin sees all tasks
             st.download_button("Download", data=out.getvalue(), file_name=f"yukti_export_{datetime.now():%Y%m%d}.xlsx")
         st.subheader("Log Viewer")
         log_viewer("updater.log", 50)
@@ -1009,7 +1028,7 @@ if st.session_state.admin_mode:
     st.stop()
 
 else:
-    # -------------------- Chat Interface --------------------
+    # -------------------- Chat Interface (unchanged) --------------------
     for msg in st.session_state.messages:
         with st.chat_message(msg["role"]):
             st.markdown(msg["content"])
@@ -1075,7 +1094,8 @@ else:
                         ans = "Image generated."
                         result = {"type": "sync", "answer": ans, "media": [{"type": "image", "url": url}]}
                     elif model_key == "Yukti‑Video":
-                        tid = model.invoke(prompt, language=st.session_state.conversation_language, **extra)
+                        # Pass user_id to model.invoke (requires model_manager update)
+                        tid = model.invoke(prompt, language=st.session_state.conversation_language, user_id=st.session_state.user_id, **extra)
                         st.session_state.tasks[tid] = {"variant": "Yukti‑Video", "status": "submitted", "progress": 0}
                         ans = f"Task {tid} started."
                         result = {"type": "async", "task_id": tid}

@@ -1,66 +1,49 @@
+# Yukti AI – Intelligent Customer Service Chatbot
 
-# Generatve AI Q&A: Question and Answer System Based on Google Palm LLM and Langchain for E-learning company  
+Yukti AI is a production‑grade, multi‑model conversational AI platform built with Streamlit. It provides a rich chat interface, advanced language detection, retrieval‑augmented generation (RAG), real‑time video/audio/image generation, and an extensive admin dashboard for system monitoring, user management, and analytics. The system is designed for scalability, stability, and ease of deployment.
 
-This is an end to end LLM project based on Google Palm and Langchain. We are building a Q&A system for an e-learning company called Nullclass.Nullclass sells data related courses and virtual internships. They have thousands of learners who uses discord server or email to ask questions. This system will provide a streamlit based user interface for students where they can ask questions and get answers. 
+---
 
+## Features
 
-## Project Highlights
+- **Multi‑Model Support**  
+  Integrates with Zhipu (GLM‑4, CogView, CogVideoX) and Google Gemini models. Text, image, audio, and video generation are all available through a unified interface.
 
-- Use a real CSV file of FAQs that Nullclass company is using right now. 
-- Their human staff will use this file to assist their course learners.
-- We will build an LLM based question and answer system that can reduce the workload of their human staff.
-- Students should be able to use this system to ask questions directly and get answers within seconds
+- **Language Detection**  
+  Automatically detects user language (100+ languages, including Hinglish) using FastText, script analysis, a Hinglish wordlist, and optional transformer fallback. Explicit language instructions (e.g., “answer in Hindi”) are respected.
 
+- **Retrieval‑Augmented Generation (RAG)**  
+  A FAISS vector store indexes a knowledge base (CSV by default). Retrieved documents are injected into prompts to ground responses. Optional cross‑encoder re‑ranking improves answer quality.
 
+- **User Authentication**  
+  Secure login and sign‑up with bcrypt‑hashed passwords. An admin user can be created automatically on first run via environment variables.
 
-## Installation
+- **Admin Dashboard**  
+  A full‑featured dashboard accessible to admin users, with real‑time system metrics (CPU, memory, disk), user CRUD operations, model performance analytics, task monitoring, and system controls.
 
-1.Clone this repository to your local machine using:
+- **Asynchronous Video Generation**  
+  Video tasks are submitted to Zhipu’s async API and polled in the background. Progress is shown in the sidebar, and completed videos can be downloaded directly.
 
-```bash
-  git clone https://github.com/aslin72/customer_service_chatbot_LLM.git
-```
-2.Navigate to the project directory:
+- **Automatic Knowledge Base Updates**  
+  A standalone updater (`run_updater.py`) can be scheduled via cron to rebuild the FAISS index from configured sources (CSV, RSS, API). Deduplication and atomic index replacement prevent corruption.
 
-```bash
-  cd customer_service_chatbot_LLM
-```
-3. Install the required dependencies using pip:
+- **Professional, Customisable UI**  
+  Cyberpunk‑themed interface with 3D buttons and neon accents. The chat area supports text, images, audio, and video with timestamped messages.
 
-```bash
-  pip install -r requirements.txt
-```
-4.Acquire an api key through makersuite.google.com and put it in .env file
+---
 
-```bash
-  GOOGLE_API_KEY="your_api_key_here"
-```
-## Usage
+## Technology Stack
 
-1. Run the Streamlit app by executing:
-```bash
-streamlit run main.py
+- **Frontend**: Streamlit, custom CSS, Plotly (charts)
+- **Backend**: Python 3.11+, FastAPI (used indirectly via Zhipu SDK)
+- **Database**: SQLite (user data, activity logs, task queue, system metrics)
+- **Vector Store**: FAISS (with `sentence-transformers/all-MiniLM-L6-v2` embeddings)
+- **LLM Providers**: Zhipu (via `zai-sdk` and `langchain-openai`) and Google Gemini (via `google-genai`)
+- **Language Detection**: FastText, Hugging Face Transformers (optional)
+- **Monitoring**: `psutil` for system metrics
 
-```
+---
 
-2.The web app will open in your browser.
+## System Architecture
 
-- To create a knowledebase of FAQs, click on Create Knolwedge Base button. It will take some time before knowledgebase is created so please wait.
-
-- Once knowledge base is created you will see a directory called faiss_index in your current folder
-
-- Now you are ready to ask questions. Type your question in Question box and hit Enter
-
-## Sample Questions
-  - Do you guys provide internship and also do you offer EMI payments?
-  - Do you have javascript course?
-  - Should I learn power bi or tableau?
-  - I've a MAC computer. Can I use powerbi on it?
-  - I don't see power pivot. how can I enable it?
-
-## Project Structure
-
-- main.py: The main Streamlit application script.
-- langchain_helper.py: This has all the langchain code
-- requirements.txt: A list of required Python packages for the project.
-- .env: Configuration file for storing your Google API key.
+The project is organised into several modules, each with a clear responsibility:

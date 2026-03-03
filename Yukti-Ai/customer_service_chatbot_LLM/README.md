@@ -6,8 +6,8 @@ Yukti AI is a production‑grade, multi‑model conversational AI platform built
 
 ## Features
 
-- **Multi‑Model Support**  
-  Integrates with Zhipu (GLM‑4, CogView, CogVideoX) and Google Gemini models. Text, image, audio, and video generation are all available through a unified interface.
+- **Yukti Model Family**  
+  Includes Yukti‑Flash (fast text & reasoning), Yukti‑Quantum (deep research), Yukti‑Image (image generation), Yukti‑Video (video generation), and Yukti‑Audio (speech synthesis). All models are accessible through a unified interface.
 
 - **Language Detection**  
   Automatically detects user language (100+ languages, including Hinglish) using FastText, script analysis, a Hinglish wordlist, and optional transformer fallback. Explicit language instructions (e.g., “answer in Hindi”) are respected.
@@ -22,7 +22,7 @@ Yukti AI is a production‑grade, multi‑model conversational AI platform built
   A full‑featured dashboard accessible to admin users, with real‑time system metrics (CPU, memory, disk), user CRUD operations, model performance analytics, task monitoring, and system controls.
 
 - **Asynchronous Video Generation**  
-  Video tasks are submitted to Zhipu’s async API and polled in the background. Progress is shown in the sidebar, and completed videos can be downloaded directly.
+  Video tasks are submitted and polled in the background. Progress is shown in the sidebar, and completed videos can be downloaded directly.
 
 - **Automatic Knowledge Base Updates**  
   A standalone updater (`run_updater.py`) can be scheduled via cron to rebuild the FAISS index from configured sources (CSV, RSS, API). Deduplication and atomic index replacement prevent corruption.
@@ -35,10 +35,9 @@ Yukti AI is a production‑grade, multi‑model conversational AI platform built
 ## Technology Stack
 
 - **Frontend**: Streamlit, custom CSS, Plotly (charts)
-- **Backend**: Python 3.11+, FastAPI (used indirectly via Zhipu SDK)
+- **Backend**: Python 3.11+, with integrations for advanced AI models (Zhipu, Google Gemini) that power the Yukti model family.
 - **Database**: SQLite (user data, activity logs, task queue, system metrics)
 - **Vector Store**: FAISS (with `sentence-transformers/all-MiniLM-L6-v2` embeddings)
-- **LLM Providers**: Zhipu (via `zai-sdk` and `langchain-openai`) and Google Gemini (via `google-genai`)
 - **Language Detection**: FastText, Hugging Face Transformers (optional)
 - **Monitoring**: `psutil` for system metrics
 

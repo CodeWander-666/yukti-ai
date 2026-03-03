@@ -1,3 +1,9 @@
+"""
+Streamlit frontend – provides cyberpunk UI, model selection, chat,
+knowledge base management, and async task display (video/image/audio).
+Integrates language detection and ensures smooth user experience.
+"""
+
 import os
 import sys
 import time
@@ -5,44 +11,78 @@ import logging
 import tempfile
 from pathlib import Path
 
-PROJECT_ROOT = Path(__file__).parent.parent.parent.parent
+# Ensure project root is in path (for cron compatibility, but not strictly needed here)
+PROJECT_ROOT = Path(__file__).parent.parent.absolute()
 if str(PROJECT_ROOT) not in sys.path:
     sys.path.insert(0, str(PROJECT_ROOT))
 
-import streamlit as st
+# Third‑party imports (with graceful fallbacks)
+try:
+    import streamlit as st
+except ImportError:
+    print("Streamlit not installed. Please install it.")
+    sys.exit(1)
+
 import pandas as pd
 import requests
-from langchain_core.documents import Document
-from langchain_community.vectorstores import FAISS
 
-from langchain_helper import get_embeddings, VECTORDB_PATH, BASE_DIR, create_vector_db
-from think import think
-from model_manager import (
-    get_available_models,
-    MODELS,
-    get_active_tasks,
-    get_task_status,
-    ZHIPU_AVAILABLE,
-    load_model,
-)
-# NEW: Import language detector
-from language_detector import detect_language
+# Local imports – each may raise ImportError if missing; we catch and show friendly message.
+try:
+    from langchain_helper import get_embeddings, VECTORDB_PATH, BASE_DIR, create_vector_db, check_kb_status
+except ImportError as e:
+    st.error(f"Failed to import langchain_helper: {e}")
+    st.stop()
 
+try:
+    from think import think
+except ImportError as e:
+    st.error(f"Failed to import think: {e}")
+    st.stop()
+
+try:
+    from model_manager import (
+        get_available_models,
+        MODELS,
+        get_active_tasks,
+        get_task_status,
+        ZHIPU_AVAILABLE,
+        load_model,
+    )
+except ImportError as e:
+    st.error(f"Failed to import model_manager: {e}")
+    st.stop()
+
+try:
+    from language_detector import detect_language
+except ImportError as e:
+    st.warning(f"Language detector not available: {e}. Responses will default to English.")
+    # Define a fallback
+    def detect_language(text):
+        return {"language": "en", "method": "fallback", "explicit_instruction": None}
+
+try:
+    from ui_helpers import render_task
+except ImportError:
+    # Define a simple fallback if ui_helpers not present
+    def render_task(task_id, task_info):
+        st.write(f"Task {task_id}: {task_info.get('status')}")
+
+# Configure logging
 logging.basicConfig(level=logging.INFO, format='%(asctime)s - %(name)s - %(levelname)s - %(message)s')
 logger = logging.getLogger(__name__)
 
 # ----------------------------------------------------------------------
-# Page configuration – no sparkle, we'll use custom HTML for the title
+# Page configuration – must be first Streamlit command
 # ----------------------------------------------------------------------
 st.set_page_config(
     page_title="Yukti AI",
-    page_icon=" ",   # empty (we'll add custom neon in the title)
+    page_icon="🤖",
     layout="wide",
     initial_sidebar_state="expanded"
 )
 
 # ----------------------------------------------------------------------
-# Cyberpunk CSS with 3D selectbox press effects
+# Cyberpunk CSS with 3D effects and media thumbnails
 # ----------------------------------------------------------------------
 st.markdown("""
 <style>
@@ -109,20 +149,19 @@ st.markdown("""
         border: 1px dashed #ff00ff;
         box-shadow: 0 0 15px rgba(255,0,255,0.3);
     }
-    /* Compact images */
-    .stImage {
-        max-width: 300px;
-        max-height: 300px;
+    /* Media thumbnails */
+    .stImage, .stVideo, .stAudio {
         border-radius: 12px;
         border: 2px solid #00ffff;
         box-shadow: 0 0 15px #00ffff;
         margin: 0.5rem 0;
+        max-width: 300px;
     }
     /* Progress bar */
     .stProgress > div > div > div {
         background: linear-gradient(90deg, #ff00ff, #00ffff);
     }
-    /* Neon URL Sticker */
+    /* URL sticker */
     .url-wrapper {
         display: flex;
         align-items: center;
@@ -163,7 +202,7 @@ st.markdown("""
         from { opacity: 1; }
         to { opacity: 0.8; box-shadow: 0 0 15px #ff00ff, inset 0 0 8px #ff00ff; }
     }
-    /* Model selector – styled as a 3D button with press effect */
+    /* Model selector – styled as 3D button */
     .stSelectbox > div > div {
         background: linear-gradient(145deg, #1e1e3f, #2a2a5a) !important;
         border: 1px solid #ff00ff !important;
@@ -199,7 +238,7 @@ st.markdown("""
 """, unsafe_allow_html=True)
 
 # ----------------------------------------------------------------------
-# Custom title: "Yukti" followed by neon "AI"
+# Custom title: "Yukti" + neon "AI"
 # ----------------------------------------------------------------------
 st.markdown("""
 <div style="display: flex; align-items: center; justify-content: center; gap: 10px;">
@@ -229,114 +268,42 @@ if "messages" not in st.session_state:
     st.session_state.messages = [
         {"role": "assistant", "content": "Hello! I'm Yukti AI. How can I help you today?"}
     ]
+
 if "knowledge_base_ready" not in st.session_state:
     try:
-        st.session_state.knowledge_base_ready = os.path.exists(VECTORDB_PATH)
+        st.session_state.knowledge_base_ready = check_kb_status()
     except Exception as e:
         logger.error(f"Failed to check knowledge base status: {e}")
         st.session_state.knowledge_base_ready = False
+
 if "tasks" not in st.session_state:
     st.session_state.tasks = {}
+
 if "uploaded_files" not in st.session_state:
     st.session_state.uploaded_files = {}
-# NEW: Track conversation language for consistency
+
 if "conversation_language" not in st.session_state:
-    st.session_state.conversation_language = None  # will be set after first message
+    st.session_state.conversation_language = None  # Will be set after first message
 
 # ----------------------------------------------------------------------
-# Data sources configuration
+# Helper functions
 # ----------------------------------------------------------------------
-SOURCES = [{
-    "type": "csv",
-    "path": os.path.join(BASE_DIR, "dataset", "dataset.csv"),
-    "name": "Original Dataset",
-    "columns": ["prompt", "response"],
-    "content_template": "Q: {prompt}\nA: {response}"
-}]
-
-# ----------------------------------------------------------------------
-# Helper functions (unchanged)
-# ----------------------------------------------------------------------
-def load_all_documents():
-    docs = []
-    for src in SOURCES:
-        if src["type"] != "csv":
-            continue
-        path = src["path"]
-        try:
-            if not os.path.exists(path):
-                st.sidebar.warning(f"File not found: {path}")
-                continue
-
-            encodings = ['utf-8', 'cp1252', 'latin-1', 'iso-8859-1']
-            df = None
-            for enc in encodings:
-                try:
-                    df = pd.read_csv(path, encoding=enc, on_bad_lines='skip')
-                    break
-                except UnicodeDecodeError:
-                    continue
-                except pd.errors.EmptyDataError:
-                    st.sidebar.error(f"File {path} is empty.")
-                    return None
-                except pd.errors.ParserError as e:
-                    st.sidebar.error(f"CSV parsing error in {path}: {e}")
-                    return None
-                except Exception as e:
-                    logger.warning(f"Unexpected error reading {path} with {enc}: {e}")
-                    continue
-
-            if df is None:
-                st.sidebar.error(f"Cannot read {path} with any tried encoding.")
-                return None
-
-            missing = [c for c in src["columns"] if c not in df.columns]
-            if missing:
-                st.sidebar.error(f"Missing columns {missing} in {path}")
-                return None
-
-            for idx, row in df.iterrows():
-                try:
-                    content = src["content_template"].format(**{c: row[c] for c in src["columns"]})
-                    docs.append(Document(
-                        page_content=content,
-                        metadata={"source": path, "row": idx}
-                    ))
-                except Exception as e:
-                    logger.warning(f"Row {idx} formatting error: {e}")
-                    continue
-
-            st.sidebar.success(f"Loaded {len(df)} rows from {src['name']}")
-
-        except Exception as e:
-            st.sidebar.error(f"Error reading {path}: {e}")
-            logger.exception("load_all_documents fatal")
-            return None
-    return docs
-
 def rebuild_knowledge_base():
-    with st.spinner("Loading documents..."):
-        docs = load_all_documents()
-        if docs is None:
-            st.error("Failed to load documents. Check logs.")
-            return False
-        if not docs:
-            st.warning("No documents found.")
-            return False
-    with st.spinner("Generating embeddings and building index..."):
-        try:
-            embeddings = get_embeddings()
-            vectordb = FAISS.from_documents(docs, embeddings)
-            vectordb.save_local(VECTORDB_PATH)
+    """Wrapper for create_vector_db with error handling and user feedback."""
+    try:
+        with st.spinner("Rebuilding knowledge base..."):
+            success = create_vector_db()
+        if success:
             st.session_state.knowledge_base_ready = True
-            st.success(f"Knowledge base rebuilt with {len(docs)} documents!")
-            return True
-        except Exception as e:
-            st.error(f"Build failed: {e}")
-            logger.exception("rebuild_knowledge_base")
-            return False
+            st.success("✅ Knowledge base updated!")
+        else:
+            st.error("❌ Knowledge base update failed. Check logs.")
+    except Exception as e:
+        st.error(f"❌ Unexpected error: {e}")
+        logger.exception("rebuild_knowledge_base")
 
 def stream_response(placeholder, full_text, delay=0.02):
+    """Simulate streaming by gradually revealing words."""
     if not full_text or not isinstance(full_text, str):
         placeholder.markdown("")
         return
@@ -352,41 +319,8 @@ def stream_response(placeholder, full_text, delay=0.02):
         logger.warning(f"Streaming error: {e}")
         placeholder.markdown(full_text)
 
-def render_task(task_id):
-    task_info = st.session_state.tasks.get(task_id)
-    if not task_info:
-        return
-    with st.container():
-        cols = st.columns([3, 1])
-        with cols[0]:
-            st.markdown(f"**{task_info['variant']}**  \n`{task_id[:8]}`")
-            if task_info['status'] == 'processing':
-                st.progress(task_info['progress']/100, text=f"{task_info['progress']}%")
-            elif task_info['status'] == 'completed':
-                st.success("✅ Completed")
-            elif task_info['status'] == 'failed':
-                st.error(f"❌ Failed: {task_info['error']}")
-            else:
-                st.info("⏳ Queued...")
-        with cols[1]:
-            if task_info['status'] == 'processing':
-                if st.button("⟳", key=f"refresh_{task_id}"):
-                    updated = get_task_status(task_id)
-                    if updated:
-                        st.session_state.tasks[task_id].update(updated)
-                    st.rerun()
-            elif task_info['status'] == 'completed' and task_info.get('result_url'):
-                if task_info['variant'] == 'Yukti‑Video':
-                    st.markdown(f"[🎬 Watch Video]({task_info['result_url']})")
-                    st.download_button("📥 Download", data=requests.get(task_info['result_url']).content,
-                                       file_name=f"yukti_video_{task_id[:8]}.mp4")
-                else:
-                    st.image(task_info['result_url'], use_container_width=False, width=300)
-                    st.download_button("📥 Download Image", data=requests.get(task_info['result_url']).content,
-                                       file_name=f"yukti_image_{task_id[:8]}.png")
-
 # ----------------------------------------------------------------------
-# Sidebar (unchanged)
+# Sidebar
 # ----------------------------------------------------------------------
 with st.sidebar:
     st.markdown("""
@@ -398,7 +332,16 @@ with st.sidebar:
     st.divider()
 
     st.markdown("## 🧠 Brain")
-    model_options = get_available_models()
+    try:
+        model_options = get_available_models()
+        if not model_options:
+            st.warning("No models available. Check API keys.")
+            model_options = ["Yukti‑Flash"]  # fallback
+    except Exception as e:
+        st.error(f"Failed to fetch models: {e}")
+        logger.exception("get_available_models")
+        model_options = ["Yukti‑Flash"]
+
     display_names = [
         f"{m} – {MODELS.get(m, {}).get('description', 'No description')}"
         for m in model_options
@@ -433,6 +376,7 @@ with st.sidebar:
         st.markdown("⚠️ **Not built**")
     st.divider()
 
+    # Async tasks section
     if ZHIPU_AVAILABLE:
         st.markdown("### 📋 Tasks")
         if st.button("⟳ Refresh Tasks", use_container_width=True):
@@ -455,9 +399,10 @@ with st.sidebar:
                     })
         except Exception as e:
             st.warning(f"Could not fetch tasks: {e}")
+            logger.exception("get_active_tasks")
 
         for task_id in list(st.session_state.tasks.keys()):
-            render_task(task_id)
+            render_task(task_id, st.session_state.tasks[task_id])
         st.divider()
 
     if st.button("🗑️ Clear Chat", use_container_width=True):
@@ -476,18 +421,62 @@ for msg in st.session_state.messages:
             for media in msg["media"]:
                 if media["type"] == "image":
                     st.image(media["url"], use_container_width=False, width=300)
+                    # Download button
+                    try:
+                        img_data = requests.get(media["url"]).content
+                        st.download_button(
+                            "📥 Download Image",
+                            data=img_data,
+                            file_name=f"yukti_image_{hash(media['url'])}.png",
+                            key=f"dl_img_{hash(media['url'])}"
+                        )
+                    except Exception as e:
+                        st.error(f"Download failed: {e}")
+                        logger.exception("Image download")
                 elif media["type"] == "audio":
                     st.audio(media["url"])
+                    # Download button
+                    try:
+                        with open(media["url"], "rb") as f:
+                            audio_data = f.read()
+                        st.download_button(
+                            "📥 Download Audio",
+                            data=audio_data,
+                            file_name=f"yukti_audio_{hash(media['url'])}.wav",
+                            key=f"dl_audio_{hash(media['url'])}"
+                        )
+                    except Exception as e:
+                        st.error(f"Download failed: {e}")
+                        logger.exception("Audio download")
                 elif media["type"] == "video":
                     st.video(media["url"])
+                    # Download button (streaming to avoid memory issues)
+                    try:
+                        with st.spinner("Preparing download..."):
+                            response = requests.get(media["url"], stream=True)
+                            response.raise_for_status()
+                            st.download_button(
+                                "📥 Download Video",
+                                data=response.iter_content(chunk_size=8192),
+                                file_name=f"yukti_video_{hash(media['url'])}.mp4",
+                                key=f"dl_video_{hash(media['url'])}"
+                            )
+                    except Exception as e:
+                        st.error(f"Download failed: {e}")
+                        logger.exception("Video download")
 
 if prompt := st.chat_input("Ask me anything..."):
     # Detect language and tone
-    lang_info = detect_language(prompt)
-    target_lang = lang_info['language']
-    explicit = lang_info['explicit_instruction']
-    logger.info(f"Detected language: {target_lang} (method: {lang_info['method']}, explicit: {explicit})")
-    
+    try:
+        lang_info = detect_language(prompt)
+        target_lang = lang_info['language']
+        explicit = lang_info.get('explicit_instruction')
+        logger.info(f"Detected language: {target_lang} (method: {lang_info.get('method')}, explicit: {explicit})")
+    except Exception as e:
+        logger.warning(f"Language detection failed: {e}")
+        target_lang = 'en'
+        explicit = None
+
     # Update conversation language if explicit instruction or first message
     if explicit:
         st.session_state.conversation_language = explicit
@@ -511,11 +500,13 @@ if prompt := st.chat_input("Ask me anything..."):
             config = MODELS.get(model_key, {})
             extra_kwargs = {}
             if uploaded_file is not None:
+                # Save uploaded file to temp location
                 with tempfile.NamedTemporaryFile(delete=False, suffix=Path(uploaded_file.name).suffix) as tmp:
                     tmp.write(uploaded_file.getvalue())
-                    extra_kwargs["image_url"] = tmp.name
+                    extra_kwargs["image_url"] = tmp.name  # for video/image
+                    # For audio, we might need to handle differently; but video/image only accept image_url
 
-            # For text models, pass language as extra kwargs
+            # For text models, call think()
             if model_key in ["Yukti‑Flash", "Yukti‑Quantum"]:
                 if not st.session_state.knowledge_base_ready:
                     full_response = "The knowledge base is not ready. Please click 'Update' in the sidebar first."
@@ -524,37 +515,45 @@ if prompt := st.chat_input("Ask me anything..."):
                 else:
                     history = [
                         {"role": msg["role"], "content": msg["content"]}
-                        for msg in st.session_state.messages[-10:]
+                        for msg in st.session_state.messages[-10:]  # last 10 messages
                     ]
                     with st.spinner("Thinking..."):
-                        # Pass the conversation language (or explicit if any) to think()
-                        # The language will be used by the model via kwargs
                         result = think(prompt, history, model_key, language=st.session_state.conversation_language)
             else:
-                # Generation models – may or may not use language; pass it anyway
+                # Generation models
                 model = load_model(model_key)
                 with st.spinner("Generating..."):
                     if model_key == "Yukti‑Audio":
-                        voice = "female"
-                        # Pass language hint (though GLM-4-Voice may not use it directly)
+                        voice = "female"  # could be made configurable
                         audio_path = model.invoke(prompt, voice=voice, language=st.session_state.conversation_language, **extra_kwargs)
                         with open(audio_path, "rb") as f:
                             audio_bytes = f.read()
                         st.audio(audio_bytes, format="audio/wav")
-                        st.download_button("📥 Download Audio", data=audio_bytes, file_name="yukti_audio.wav")
+                        st.download_button(
+                            "📥 Download Audio",
+                            data=audio_bytes,
+                            file_name=f"yukti_audio_{int(time.time())}.wav"
+                        )
                         full_response = "Audio generated."
                         result = {"type": "sync", "format": "audio"}
                         media.append({"type": "audio", "url": audio_path})
                     elif model_key == "Yukti‑Image":
                         image_url = model.invoke(prompt, **extra_kwargs)
                         st.image(image_url, use_container_width=False, width=300)
-                        img_data = requests.get(image_url).content
-                        st.download_button("📥 Download Image", data=img_data, file_name="yukti_image.png")
+                        try:
+                            img_data = requests.get(image_url).content
+                            st.download_button(
+                                "📥 Download Image",
+                                data=img_data,
+                                file_name=f"yukti_image_{int(time.time())}.png"
+                            )
+                        except Exception as e:
+                            st.error(f"Download failed: {e}")
                         full_response = "Image generated."
                         result = {"type": "sync", "format": "image"}
                         media.append({"type": "image", "url": image_url})
                     elif model_key == "Yukti‑Video":
-                        task_id = model.invoke(prompt, **extra_kwargs)
+                        task_id = model.invoke(prompt, language=st.session_state.conversation_language, **extra_kwargs)
                         st.session_state.tasks[task_id] = {
                             "variant": "Yukti‑Video",
                             "status": "submitted",
@@ -565,6 +564,7 @@ if prompt := st.chat_input("Ask me anything..."):
                         full_response = f"Video task started: `{task_id}`"
                         result = {"type": "async", "task_id": task_id}
                     else:
+                        # Fallback to think for any other model
                         history = [
                             {"role": msg["role"], "content": msg["content"]}
                             for msg in st.session_state.messages[-10:]
@@ -598,7 +598,7 @@ if prompt := st.chat_input("Ask me anything..."):
             logger.exception("Fatal error in main chat loop")
             full_response = ""
 
-
+    # Append assistant message to session state
     if result and result.get("type") == "sync" and result.get("answer"):
         st.session_state.messages.append({"role": "assistant", "content": answer, "media": media})
     elif result and result.get("type") == "async":

@@ -1,13 +1,13 @@
 """
 Handles all vector store operations – embeddings, FAISS index creation,
-retrieval, and optional re‑ranking. Includes robust error handling and
-encoding fallbacks.
+retrieval, and optional re‑ranking. Includes comprehensive error handling
+and detailed diagnostics.
 """
 
 import os
 import logging
 from pathlib import Path
-from typing import List, Optional
+from typing import List, Optional, Dict, Any
 
 import streamlit as st
 import pandas as pd
@@ -19,7 +19,7 @@ from langchain_core.documents import Document
 try:
     from embeddings import get_embeddings
 except ImportError:
-    # Fallback: define a simple embedding loader (should not happen in normal setup)
+    # Fallback: define a simple embedding loader
     from langchain_community.embeddings import HuggingFaceEmbeddings
     def get_embeddings():
         return HuggingFaceEmbeddings(model_name="sentence-transformers/all-MiniLM-L6-v2")
@@ -32,12 +32,72 @@ logger = logging.getLogger(__name__)
 ENCODINGS = ['utf-8', 'cp1252', 'latin-1', 'iso-8859-1']
 
 # ----------------------------------------------------------------------
-# Core functions
+# Detailed status checker
 # ----------------------------------------------------------------------
+def get_kb_detailed_status() -> Dict[str, Any]:
+    """
+    Returns a dictionary with detailed status of the knowledge base.
+    Keys:
+        - ready: bool (True if index exists and can be loaded)
+        - error: str or None (if any error occurred during check)
+        - path_exists: bool
+        - index_loadable: bool (if FAISS can load without error)
+        - document_count: int or None
+        - dataset_exists: bool (if the source CSV exists)
+        - dataset_readable: bool (if CSV can be read)
+        - encoding_used: str or None
+    """
+    result = {
+        "ready": False,
+        "error": None,
+        "path_exists": VECTORDB_PATH.exists(),
+        "index_loadable": False,
+        "document_count": None,
+        "dataset_exists": False,
+        "dataset_readable": False,
+        "encoding_used": None,
+    }
+    # Check dataset
+    csv_path = BASE_DIR / "dataset" / "dataset.csv"
+    result["dataset_exists"] = csv_path.exists()
+    if csv_path.exists():
+        # Try to read with different encodings
+        for enc in ENCODINGS:
+            try:
+                pd.read_csv(csv_path, encoding=enc, nrows=1)
+                result["dataset_readable"] = True
+                result["encoding_used"] = enc
+                break
+            except Exception:
+                continue
+        if not result["dataset_readable"]:
+            result["error"] = f"Dataset exists but cannot be read with any tried encoding: {ENCODINGS}"
+
+    # Try to load the index
+    if result["path_exists"]:
+        try:
+            embeddings = get_embeddings()
+            vectordb = FAISS.load_local(
+                str(VECTORDB_PATH),
+                embeddings,
+                allow_dangerous_deserialization=True
+            )
+            result["index_loadable"] = True
+            result["document_count"] = vectordb.index.ntotal
+            result["ready"] = True
+        except Exception as e:
+            result["error"] = f"Index exists but cannot be loaded: {e}"
+            logger.exception("FAISS load failed")
+    else:
+        result["error"] = "Index directory does not exist."
+
+    return result
+
 def create_vector_db() -> bool:
     """
     Build FAISS index from the main dataset CSV.
     Tries multiple encodings and returns success status.
+    Includes detailed logging and error capture.
     """
     csv_path = BASE_DIR / "dataset" / "dataset.csv"
     if not csv_path.exists():
@@ -47,6 +107,7 @@ def create_vector_db() -> bool:
 
     # Try each encoding until one works
     data = None
+    used_encoding = None
     for enc in ENCODINGS:
         try:
             loader = CSVLoader(
@@ -55,6 +116,7 @@ def create_vector_db() -> bool:
                 encoding=enc
             )
             data = loader.load()
+            used_encoding = enc
             logger.info(f"Loaded {len(data)} documents with encoding {enc}")
             break
         except UnicodeDecodeError:
@@ -62,7 +124,7 @@ def create_vector_db() -> bool:
         except Exception as e:
             logger.warning(f"Failed with encoding {enc}: {e}")
             continue
-    else:
+    if data is None:
         st.error("❌ Could not read CSV with any supported encoding.")
         logger.error("All encodings failed for dataset.csv")
         return False
@@ -72,7 +134,7 @@ def create_vector_db() -> bool:
         vectordb = FAISS.from_documents(data, embeddings)
         vectordb.save_local(str(VECTORDB_PATH))
         logger.info(f"Index saved to {VECTORDB_PATH}")
-        st.success(f"✅ Knowledge base rebuilt with {len(data)} documents!")
+        st.success(f"✅ Knowledge base rebuilt with {len(data)} documents (encoding: {used_encoding})!")
         return True
     except Exception as e:
         st.error(f"❌ Failed to build index: {e}")
@@ -180,4 +242,5 @@ __all__ = [
     "retrieve_and_rerank",
     "VECTORDB_PATH",
     "BASE_DIR",
+    "get_kb_detailed_status",
 ]

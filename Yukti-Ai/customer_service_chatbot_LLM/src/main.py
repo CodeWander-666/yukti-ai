@@ -228,16 +228,7 @@ if admin_pass:
         conn.close()
     except Exception as e:
         logger.error(f"Failed to create default admin: {e}")
-try:
-    conn = sqlite3.connect(str(DB_PATH))
-    c = conn.cursor()
-    # Replace 'admin1234' with your actual login username
-    c.execute("UPDATE users SET is_admin = 1 WHERE username = ?", ('admin1234',))
-    conn.commit()
-    conn.close()
-    logger.info("Forced admin status for user admin1234")
-except Exception as e:
-    logger.error(f"Failed to force admin: {e}")
+
 # ----------------------------------------------------------------------
 # Password hashing (bcrypt)
 # ----------------------------------------------------------------------
@@ -390,7 +381,7 @@ def record_kb_metrics():
         logger.error(f"Failed to record KB metrics: {e}")
 
 # ----------------------------------------------------------------------
-# Admin dashboard functions (CRUD)
+# Admin dashboard functions (CRUD and analytics)
 # ----------------------------------------------------------------------
 def get_all_users() -> List[Dict[str, Any]]:
     """Return list of all users (excluding password hash)."""
@@ -407,6 +398,29 @@ def get_all_users() -> List[Dict[str, Any]]:
     except Exception as e:
         logger.exception("Failed to fetch users")
         return []
+
+def get_user_message_counts() -> pd.DataFrame:
+    """Return per-user message statistics."""
+    try:
+        conn = sqlite3.connect(str(DB_PATH))
+        query = """
+            SELECT 
+                u.username,
+                COUNT(a.id) as total_messages,
+                SUM(CASE WHEN a.success = 1 THEN 1 ELSE 0 END) as successful,
+                SUM(CASE WHEN a.success = 0 THEN 1 ELSE 0 END) as failed,
+                MAX(a.timestamp) as last_active
+            FROM users u
+            LEFT JOIN user_activity a ON u.id = a.user_id
+            GROUP BY u.id
+            ORDER BY total_messages DESC
+        """
+        df = pd.read_sql_query(query, conn)
+        conn.close()
+        return df
+    except Exception as e:
+        logger.exception("Failed to get user message counts")
+        return pd.DataFrame()
 
 def update_user(user_id: int, username: str, password: Optional[str], is_admin: bool) -> Tuple[bool, str]:
     """Update user details. If password is None/empty, keep existing."""
@@ -470,9 +484,6 @@ def create_user(username: str, password: str, is_admin: bool) -> Tuple[bool, str
         logger.exception("Failed to create user")
         return False, str(e)
 
-# ----------------------------------------------------------------------
-# Analytics functions
-# ----------------------------------------------------------------------
 def get_model_performance(days: int = 7) -> pd.DataFrame:
     """Aggregate model performance over last N days."""
     try:
@@ -556,6 +567,32 @@ def get_kb_history(days: int = 30) -> pd.DataFrame:
         return df
     except Exception as e:
         logger.exception("Failed to get KB history")
+        return pd.DataFrame()
+
+def get_task_history(limit=100) -> pd.DataFrame:
+    """Return recent task history."""
+    try:
+        conn = sqlite3.connect(str(DB_PATH))
+        query = f"""
+            SELECT 
+                task_id,
+                variant,
+                model,
+                status,
+                progress,
+                result_url,
+                error,
+                created_at,
+                completed_at
+            FROM tasks
+            ORDER BY created_at DESC
+            LIMIT {limit}
+        """
+        df = pd.read_sql_query(query, conn)
+        conn.close()
+        return df
+    except Exception as e:
+        logger.exception("Failed to get task history")
         return pd.DataFrame()
 
 # ----------------------------------------------------------------------
@@ -761,26 +798,26 @@ if st.session_state.admin_mode:
     # --- Overview Tab ---
     with tabs[0]:
         st.subheader("Real‑time System Status")
-        # Real‑time metrics placeholder
-        metrics_placeholder = st.empty()
-        # Quick stats
+        # Quick stats (static, but will be updated in loop)
         col1, col2, col3, col4 = st.columns(4)
         with col1:
-            metric_card("Total Users", len(get_all_users()))
+            total_users = len(get_all_users())
+            metric_card("Total Users", total_users)
         with col2:
-            metric_card("Knowledge Base Docs", get_document_count() or 0)
+            kb_docs = get_document_count() or 0
+            metric_card("Knowledge Base Docs", kb_docs)
         with col3:
             active_tasks_count = len(get_active_tasks())
             metric_card("Active Tasks", active_tasks_count)
         with col4:
-            # Last update time from KB index
             if VECTORDB_PATH.exists():
                 mtime = datetime.fromtimestamp(VECTORDB_PATH.stat().st_mtime)
                 metric_card("Last KB Update", mtime.strftime("%Y-%m-%d %H:%M"))
             else:
                 metric_card("Last KB Update", "Never")
 
-        # Real‑time system metrics loop (auto‑refresh)
+        # Real‑time system metrics (updates every 2 seconds)
+        metrics_placeholder = st.empty()
         while st.session_state.admin_mode:
             with metrics_placeholder.container():
                 sys_metrics = get_system_metrics()
@@ -814,40 +851,57 @@ if st.session_state.admin_mode:
                         else:
                             st.error(msg)
 
-        # User table
-        users = get_all_users()
-        if users:
-            df_users = pd.DataFrame(users)
-            st.dataframe(df_users, use_container_width=True)
+        # User table with message stats
+        users_df = get_user_message_counts()
+        if not users_df.empty:
+            st.dataframe(users_df, use_container_width=True)
 
             # Edit/Delete for each user
-            for user in users:
-                if user["id"] == st.session_state.user_id:
-                    continue  # cannot edit yourself here (use profile later)
-                with st.expander(f"Edit {user['username']}"):
+            for idx, row in users_df.iterrows():
+                if row["username"] == st.session_state.username:
+                    continue  # cannot edit yourself here
+                with st.expander(f"Edit {row['username']}"):
                     col1, col2 = st.columns(2)
                     with col1:
-                        new_username = st.text_input("Username", value=user["username"], key=f"user_{user['id']}_name")
-                        new_is_admin = st.checkbox("Admin", value=user["is_admin"], key=f"user_{user['id']}_admin")
+                        new_username = st.text_input("Username", value=row["username"], key=f"user_{row['username']}_name")
+                        new_is_admin = st.checkbox("Admin", value=row.get("is_admin", False), key=f"user_{row['username']}_admin")
                     with col2:
-                        new_password = st.text_input("New Password (leave blank to keep)", type="password", key=f"user_{user['id']}_pass")
-                        if st.button("Update", key=f"user_{user['id']}_update"):
-                            ok, msg = update_user(user["id"], new_username, new_password or None, new_is_admin)
-                            if ok:
-                                log_admin_action(st.session_state.user_id, "UPDATE_USER", new_username)
-                                show_success_toast("User updated")
-                                st.rerun()
+                        new_password = st.text_input("New Password (leave blank to keep)", type="password", key=f"user_{row['username']}_pass")
+                        if st.button("Update", key=f"user_{row['username']}_update"):
+                            # Need user_id – we have to fetch it separately
+                            user_id = None
+                            for u in get_all_users():
+                                if u["username"] == row["username"]:
+                                    user_id = u["id"]
+                                    break
+                            if user_id:
+                                ok, msg = update_user(user_id, new_username, new_password or None, new_is_admin)
+                                if ok:
+                                    log_admin_action(st.session_state.user_id, "UPDATE_USER", new_username)
+                                    show_success_toast("User updated")
+                                    st.rerun()
+                                else:
+                                    st.error(msg)
                             else:
-                                st.error(msg)
-                    if st.button("Delete", key=f"user_{user['id']}_delete"):
-                        if confirm_dialog("Delete User", f"Delete {user['username']}? This cannot be undone."):
-                            ok, msg = delete_user(user["id"])
-                            if ok:
-                                log_admin_action(st.session_state.user_id, "DELETE_USER", user["username"])
-                                show_success_toast("User deleted")
-                                st.rerun()
+                                st.error("User not found")
+                    if st.button("Delete", key=f"user_{row['username']}_delete"):
+                        # Confirm
+                        if confirm_dialog("Delete User", f"Delete {row['username']}? This cannot be undone."):
+                            user_id = None
+                            for u in get_all_users():
+                                if u["username"] == row["username"]:
+                                    user_id = u["id"]
+                                    break
+                            if user_id:
+                                ok, msg = delete_user(user_id)
+                                if ok:
+                                    log_admin_action(st.session_state.user_id, "DELETE_USER", row["username"])
+                                    show_success_toast("User deleted")
+                                    st.rerun()
+                                else:
+                                    st.error(msg)
                             else:
-                                st.error(msg)
+                                st.error("User not found")
         else:
             st.info("No users found.")
 
@@ -867,7 +921,7 @@ if st.session_state.admin_mode:
         else:
             st.info("No performance data yet.")
 
-        st.subheader("User Activity")
+        st.subheader("User Activity (Last 30 Days)")
         activity_df = get_user_activity_summary(30)
         if not activity_df.empty:
             fig4 = px.line(activity_df, x="day", y="active_users", title="Daily Active Users")
@@ -877,7 +931,7 @@ if st.session_state.admin_mode:
         else:
             st.info("No activity data yet.")
 
-        st.subheader("System Metrics (Last 24h)")
+        st.subheader("System Metrics History (Last 24h)")
         sys_df = get_system_metrics_history(24)
         if not sys_df.empty:
             fig6 = px.line(sys_df, x="time", y=["cpu", "memory", "disk"], title="System Resources")
@@ -936,8 +990,12 @@ if st.session_state.admin_mode:
         else:
             st.info("No active tasks.")
 
-        st.subheader("Task History")
-        # Could add a query for completed/failed tasks
+        st.subheader("Task History (Last 100)")
+        task_history = get_task_history(100)
+        if not task_history.empty:
+            st.dataframe(task_history, use_container_width=True)
+        else:
+            st.info("No task history yet.")
 
     # --- Agentic Insights Tab ---
     with tabs[5]:
@@ -949,6 +1007,10 @@ if st.session_state.admin_mode:
             avg_error_rate = perf_df['errors'].sum() / max(perf_df['requests'].sum(), 1)
             if avg_error_rate > 0.1:
                 st.warning(f"⚠️ High error rate ({avg_error_rate:.1%}) in the last 24h.")
+            else:
+                st.success("✅ Error rates normal.")
+        else:
+            st.info("No performance data yet.")
 
         # Load prediction (simple linear regression)
         activity_df = get_user_activity_summary(14)
@@ -956,6 +1018,8 @@ if st.session_state.admin_mode:
             # Very simple forecast: average of last 7 days
             last_7_avg = activity_df.tail(7)['total_queries'].mean()
             st.info(f"📈 Forecast: ~{int(last_7_avg)} queries per day next week.")
+        else:
+            st.info("Not enough activity data for forecast.")
 
         # Recommendations
         st.subheader("Recommendations")
@@ -986,11 +1050,20 @@ if st.session_state.admin_mode:
                 if action:
                     if cols[1].button(action, key=f"rec_{hash(rec)}"):
                         if action_code == "REBUILD_KB":
-                            st.session_state.need_rebuild = True
-                            st.rerun()
+                            # Trigger rebuild (same as KB tab)
+                            with st.spinner("Rebuilding..."):
+                                success = create_vector_db()
+                                if success:
+                                    st.session_state.kb_status = get_kb_detailed_status()
+                                    record_kb_metrics()
+                                    log_admin_action(st.session_state.user_id, "REBUILD_KB")
+                                    show_success_toast("Knowledge base rebuilt")
+                                    st.rerun()
+                                else:
+                                    st.error("Rebuild failed")
                         elif action_code == "CLEAR_TASKS":
                             if confirm_dialog("Clear Tasks", "Delete all stale tasks?"):
-                                # Implement clear logic
+                                # Implement clear logic (for now just a message)
                                 show_success_toast("Tasks cleared (not implemented)")
         else:
             st.success("All systems nominal.")
@@ -999,7 +1072,7 @@ if st.session_state.admin_mode:
     with tabs[6]:
         st.subheader("System Control")
         if st.button("📥 Export Analytics Data"):
-            # Export all analytics tables as CSV
+            # Export all analytics tables as Excel
             import io
             output = io.BytesIO()
             with pd.ExcelWriter(output, engine='xlsxwriter') as writer:
@@ -1007,6 +1080,7 @@ if st.session_state.admin_mode:
                 get_user_activity_summary(30).to_excel(writer, sheet_name="User Activity")
                 get_system_metrics_history(24).to_excel(writer, sheet_name="System Metrics")
                 get_kb_history(30).to_excel(writer, sheet_name="KB History")
+                get_task_history(100).to_excel(writer, sheet_name="Task History")
             st.download_button(
                 "Download Export",
                 data=output.getvalue(),

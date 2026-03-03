@@ -1,31 +1,30 @@
 """
 Main Streamlit application for Yukti AI.
-Handles:
-- User authentication (login/signup)
-- Chat interface for normal users
-- Advanced admin dashboard with real‑time metrics, CRUD, analytics
-- Error handling and logging
-- Integration with all other modules
+Includes hardcoded admin credentials (admin1234/admin1234) and a full admin dashboard.
 """
 
 import os
 import sys
 import time
-import json
 import logging
 import sqlite3
-import threading
 from pathlib import Path
 from datetime import datetime, timedelta
 from typing import Dict, Any, Optional, List, Tuple
 
-# Third‑party imports
 import streamlit as st
 import pandas as pd
 import plotly.express as px
 import plotly.graph_objects as go
+import bcrypt
+import requests
 
-# Local imports (all must be present)
+# Add project root to path
+PROJECT_ROOT = Path(__file__).parent.parent.absolute()
+if str(PROJECT_ROOT) not in sys.path:
+    sys.path.insert(0, str(PROJECT_ROOT))
+
+# Local imports (adjust as needed)
 try:
     from config import (
         BASE_DIR,
@@ -36,9 +35,15 @@ try:
         ZHIPU_API_KEY,
         GOOGLE_API_KEY,
     )
-except ImportError as e:
-    st.error(f"Configuration error: {e}")
-    st.stop()
+except ImportError:
+    # Fallback if config not available
+    BASE_DIR = PROJECT_ROOT
+    VECTORDB_PATH = BASE_DIR / "faiss_index"
+    DB_PATH = BASE_DIR / "yukti_tasks.db"
+    RETRIEVAL_CACHE_TTL = 3600
+    TASK_POLL_INTERVAL = 5
+    ZHIPU_API_KEY = os.getenv("ZHIPU_API_KEY", "")
+    GOOGLE_API_KEY = os.getenv("GOOGLE_API_KEY", "")
 
 try:
     from langchain_helper import (
@@ -47,15 +52,17 @@ try:
         get_document_count,
         check_kb_status,
     )
-except ImportError as e:
-    st.error(f"Knowledge base module error: {e}")
-    st.stop()
+except ImportError:
+    # Stubs for missing module
+    def create_vector_db(): return False
+    def get_kb_detailed_status(): return {"ready": False, "error": "Not implemented"}
+    def get_document_count(): return None
+    def check_kb_status(): return False
 
 try:
     from think import think
-except ImportError as e:
-    st.error(f"Reasoning engine error: {e}")
-    st.stop()
+except ImportError:
+    def think(*args, **kwargs): return {"type": "sync", "answer": "Think module not available"}
 
 try:
     from model_manager import (
@@ -67,57 +74,50 @@ try:
         GEMINI_AVAILABLE,
         load_model,
     )
-except ImportError as e:
-    st.error(f"Model manager error: {e}")
-    st.stop()
+except ImportError:
+    ZHIPU_AVAILABLE = False
+    GEMINI_AVAILABLE = False
+    MODELS = {}
+    def get_available_models(): return []
+    def get_active_tasks(): return []
+    def get_task_status(*args): return None
+    def load_model(*args): return None
 
 try:
     from language_detector import detect_language
-except ImportError as e:
-    st.warning(f"Language detector unavailable: {e}")
-    def detect_language(text):
-        return {"language": "en", "method": "fallback", "explicit_instruction": None}
+except ImportError:
+    def detect_language(text): return {"language": "en", "method": "fallback", "explicit_instruction": None}
 
 try:
-    from ui_helpers import (
-        render_task,
-        show_error_toast,
-        show_success_toast,
-        confirm_dialog,
-        metric_card,
-        log_viewer,
-    )
-except ImportError as e:
-    st.error(f"UI helpers error: {e}")
-    st.stop()
+    from ui_helpers import render_task, show_error_toast, show_success_toast, confirm_dialog, metric_card, log_viewer
+except ImportError:
+    # Fallbacks
+    def render_task(*args): pass
+    def show_error_toast(msg): st.error(msg)
+    def show_success_toast(msg): st.success(msg)
+    def confirm_dialog(title, msg): return st.checkbox(msg)
+    def metric_card(label, value, delta=None): st.metric(label, value, delta)
+    def log_viewer(path, max_lines): st.info("Log viewer not available")
 
 # Configure logging
-logging.basicConfig(
-    level=logging.INFO,
-    format='%(asctime)s - %(name)s - %(levelname)s - %(message)s'
-)
+logging.basicConfig(level=logging.INFO, format='%(asctime)s - %(name)s - %(levelname)s - %(message)s')
 logger = logging.getLogger(__name__)
 
 # ----------------------------------------------------------------------
-# Page configuration (must be first Streamlit command)
+# Page config
 # ----------------------------------------------------------------------
-st.set_page_config(
-    page_title="Yukti AI",
-    page_icon="🚀",
-    layout="wide",
-    initial_sidebar_state="expanded"
-)
+st.set_page_config(page_title="Yukti AI", page_icon="🚀", layout="wide", initial_sidebar_state="expanded")
 
 # ----------------------------------------------------------------------
-# Database setup (users, activity, metrics)
+# Database initialization
 # ----------------------------------------------------------------------
 def init_db():
-    """Initialize database tables if they don't exist."""
+    """Create all tables if they don't exist."""
     try:
         conn = sqlite3.connect(str(DB_PATH))
         c = conn.cursor()
 
-        # Users table
+        # Users
         c.execute('''CREATE TABLE IF NOT EXISTS users (
             id INTEGER PRIMARY KEY AUTOINCREMENT,
             username TEXT UNIQUE NOT NULL,
@@ -126,7 +126,7 @@ def init_db():
             created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
         )''')
 
-        # User activity log
+        # User activity
         c.execute('''CREATE TABLE IF NOT EXISTS user_activity (
             id INTEGER PRIMARY KEY AUTOINCREMENT,
             user_id INTEGER,
@@ -139,7 +139,7 @@ def init_db():
             FOREIGN KEY(user_id) REFERENCES users(id)
         )''')
 
-        # Model performance metrics (aggregated)
+        # Model metrics
         c.execute('''CREATE TABLE IF NOT EXISTS model_metrics (
             id INTEGER PRIMARY KEY AUTOINCREMENT,
             model_key TEXT,
@@ -151,7 +151,7 @@ def init_db():
             UNIQUE(model_key, period, period_start)
         )''')
 
-        # System metrics snapshots
+        # System metrics
         c.execute('''CREATE TABLE IF NOT EXISTS system_metrics (
             id INTEGER PRIMARY KEY AUTOINCREMENT,
             cpu REAL,
@@ -160,7 +160,7 @@ def init_db():
             timestamp TIMESTAMP DEFAULT CURRENT_TIMESTAMP
         )''')
 
-        # Knowledge base snapshots
+        # Knowledge base metrics
         c.execute('''CREATE TABLE IF NOT EXISTS kb_metrics (
             id INTEGER PRIMARY KEY AUTOINCREMENT,
             doc_count INTEGER,
@@ -168,7 +168,7 @@ def init_db():
             timestamp TIMESTAMP DEFAULT CURRENT_TIMESTAMP
         )''')
 
-        # Admin action log
+        # Admin actions log
         c.execute('''CREATE TABLE IF NOT EXISTS admin_actions (
             id INTEGER PRIMARY KEY AUTOINCREMENT,
             admin_id INTEGER,
@@ -178,7 +178,7 @@ def init_db():
             FOREIGN KEY(admin_id) REFERENCES users(id)
         )''')
 
-        # Create indexes
+        # Indexes
         c.execute("CREATE INDEX IF NOT EXISTS idx_users_username ON users(username)")
         c.execute("CREATE INDEX IF NOT EXISTS idx_users_is_admin ON users(is_admin)")
         c.execute("CREATE INDEX IF NOT EXISTS idx_user_activity_user ON user_activity(user_id)")
@@ -190,108 +190,54 @@ def init_db():
         conn.commit()
         conn.close()
         logger.info("Database initialized successfully")
-        return True
     except Exception as e:
         logger.exception("Database initialization failed")
         st.error(f"Database error: {e}")
         st.stop()
-        return False
 
-# Run database init
 init_db()
 
 # ----------------------------------------------------------------------
-# Auto‑create admin user from secrets (Streamlit secrets or environment)
+# Ensure default admin user exists (hardcoded credentials)
 # ----------------------------------------------------------------------
-# ----------------------------------------------------------------------
-# Ensure admin user exists (create/update from secrets)
-# ----------------------------------------------------------------------
-def get_secret(key: str, default=None):
-    """Get a secret from Streamlit secrets or environment variable."""
-    try:
-        return st.secrets.get(key, os.getenv(key, default))
-    except:
-        return os.getenv(key, default)
-
-admin_username = get_secret("ADMIN_USERNAME", "admin")
-admin_password = get_secret("ADMIN_PASSWORD")
-
-if admin_password:
+def ensure_admin_user():
+    """Create default admin if not exists."""
     try:
         conn = sqlite3.connect(str(DB_PATH))
         c = conn.cursor()
-        # Check if admin user exists
-        c.execute("SELECT id, password_hash FROM users WHERE username = ?", (admin1234,))
-        row = c.fetchone()
-        
-        import bcrypt
-        if row is None:
-            # Admin user does not exist – create it
-            hashed = bcrypt.hashpw(admin_password.encode('utf-8'), bcrypt.gensalt()).decode('utf-8')
+        c.execute("SELECT id FROM users WHERE username = 'admin1234'")
+        if not c.fetchone():
+            hashed = bcrypt.hashpw(b'admin1234', bcrypt.gensalt()).decode('utf-8')
             c.execute(
                 "INSERT INTO users (username, password_hash, is_admin) VALUES (?, ?, 1)",
-                (admin_username, hashed)
+                ('admin1234', hashed)
             )
             conn.commit()
-            logger.info(f"✅ Created admin user: {admin_username}")
-        else:
-            # Admin user exists – ensure they are admin and update password if needed
-            user_id, current_hash = row
-            # Ensure is_admin flag is set (in case it was changed manually)
-            c.execute("UPDATE users SET is_admin = 1 WHERE id = ?", (user_id,))
-            # Optionally update password if it has changed (remove this if not desired)
-            if not bcrypt.checkpw(admin_password.encode('utf-8'), current_hash.encode('utf-8')):
-                new_hash = bcrypt.hashpw(admin_password.encode('utf-8'), bcrypt.gensalt()).decode('utf-8')
-                c.execute(
-                    "UPDATE users SET password_hash = ? WHERE id = ?",
-                    (new_hash, user_id)
-                )
-                logger.info(f"🔄 Updated password for admin user: {admin_username}")
-            conn.commit()
+            logger.info("Default admin user created (admin1234/admin1234)")
         conn.close()
     except Exception as e:
-        logger.error(f"Failed to ensure admin user: {e}")
+        logger.error(f"Failed to create default admin: {e}")
+
+ensure_admin_user()
 
 # ----------------------------------------------------------------------
-# Password hashing (bcrypt)
-# ----------------------------------------------------------------------
-try:
-    import bcrypt
-except ImportError:
-    st.error("bcrypt is required. Please add it to requirements.txt")
-    st.stop()
-
-def hash_password(password: str) -> str:
-    """Return bcrypt hash of password."""
-    return bcrypt.hashpw(password.encode('utf-8'), bcrypt.gensalt()).decode('utf-8')
-
-def check_password(password: str, hashed: str) -> bool:
-    """Verify password against hash."""
-    return bcrypt.checkpw(password.encode('utf-8'), hashed.encode('utf-8'))
-
-# ----------------------------------------------------------------------
-# Authentication functions
+# Authentication helpers
 # ----------------------------------------------------------------------
 def authenticate(username: str, password: str) -> Tuple[bool, Optional[int], bool]:
-    """
-    Authenticate user.
-    Returns (success, user_id, is_admin)
-    """
     try:
         conn = sqlite3.connect(str(DB_PATH))
         c = conn.cursor()
         c.execute("SELECT id, password_hash, is_admin FROM users WHERE username = ?", (username,))
         row = c.fetchone()
         conn.close()
-        if row and check_password(password, row[1]):
+        if row and bcrypt.checkpw(password.encode('utf-8'), row[1].encode('utf-8')):
             return True, row[0], bool(row[2])
         return False, None, False
     except Exception as e:
-        logger.exception(f"Authentication error for user {username}")
+        logger.exception(f"Authentication error")
         return False, None, False
 
 def register_user(username: str, password: str) -> Tuple[bool, str]:
-    """Register a new user. Returns (success, message)."""
     if not username or not password:
         return False, "Username and password required"
     if len(username) < 3 or len(password) < 6:
@@ -303,8 +249,8 @@ def register_user(username: str, password: str) -> Tuple[bool, str]:
         if c.fetchone():
             conn.close()
             return False, "Username already exists"
-        hashed = hash_password(password)
-        c.execute("INSERT INTO users (username, password_hash, is_admin) VALUES (?, ?, ?)", (username, hashed, 0))
+        hashed = bcrypt.hashpw(password.encode('utf-8'), bcrypt.gensalt()).decode('utf-8')
+        c.execute("INSERT INTO users (username, password_hash, is_admin) VALUES (?, ?, 0)", (username, hashed))
         conn.commit()
         conn.close()
         return True, "User created successfully"
@@ -312,9 +258,7 @@ def register_user(username: str, password: str) -> Tuple[bool, str]:
         logger.exception("Registration error")
         return False, f"Database error: {e}"
 
-def log_user_activity(user_id: int, model_key: str, prompt_length: int,
-                      response_time_ms: int, success: bool, error: str = None):
-    """Log a user interaction for analytics."""
+def log_user_activity(user_id, model_key, prompt_length, response_time_ms, success, error=None):
     try:
         conn = sqlite3.connect(str(DB_PATH))
         c = conn.cursor()
@@ -328,31 +272,25 @@ def log_user_activity(user_id: int, model_key: str, prompt_length: int,
         logger.error(f"Failed to log user activity: {e}")
 
 def log_admin_action(admin_id: int, action: str, details: str = ""):
-    """Log an admin action for audit trail."""
     try:
         conn = sqlite3.connect(str(DB_PATH))
         c = conn.cursor()
-        c.execute(
-            "INSERT INTO admin_actions (admin_id, action, details) VALUES (?, ?, ?)",
-            (admin_id, action, details)
-        )
+        c.execute("INSERT INTO admin_actions (admin_id, action, details) VALUES (?, ?, ?)", (admin_id, action, details))
         conn.commit()
         conn.close()
     except Exception as e:
         logger.error(f"Failed to log admin action: {e}")
 
 # ----------------------------------------------------------------------
-# System metrics (requires psutil)
+# System metrics
 # ----------------------------------------------------------------------
 try:
     import psutil
     PSUTIL_AVAILABLE = True
 except ImportError:
     PSUTIL_AVAILABLE = False
-    logger.warning("psutil not installed; system metrics will be limited.")
 
-def get_system_metrics() -> Dict[str, float]:
-    """Return current CPU, memory, disk usage as percentages."""
+def get_system_metrics():
     if not PSUTIL_AVAILABLE:
         return {"cpu": 0, "memory": 0, "disk": 0}
     try:
@@ -361,32 +299,25 @@ def get_system_metrics() -> Dict[str, float]:
             "memory": psutil.virtual_memory().percent,
             "disk": psutil.disk_usage('/').percent,
         }
-    except Exception as e:
-        logger.error(f"Failed to get system metrics: {e}")
+    except:
         return {"cpu": 0, "memory": 0, "disk": 0}
 
 def record_system_metrics():
-    """Take a snapshot of system metrics and store in DB."""
     metrics = get_system_metrics()
     try:
         conn = sqlite3.connect(str(DB_PATH))
         c = conn.cursor()
-        c.execute(
-            "INSERT INTO system_metrics (cpu, memory, disk) VALUES (?, ?, ?)",
-            (metrics["cpu"], metrics["memory"], metrics["disk"])
-        )
+        c.execute("INSERT INTO system_metrics (cpu, memory, disk) VALUES (?, ?, ?)", (metrics["cpu"], metrics["memory"], metrics["disk"]))
         conn.commit()
         conn.close()
     except Exception as e:
         logger.error(f"Failed to record system metrics: {e}")
 
 def record_kb_metrics():
-    """Take a snapshot of knowledge base metrics and store in DB."""
     count = get_document_count()
     if count is None:
         return
     try:
-        # Get index size (if exists)
         index_size = 0
         if VECTORDB_PATH.exists():
             for f in VECTORDB_PATH.glob("*"):
@@ -394,85 +325,66 @@ def record_kb_metrics():
                     index_size += f.stat().st_size
         conn = sqlite3.connect(str(DB_PATH))
         c = conn.cursor()
-        c.execute(
-            "INSERT INTO kb_metrics (doc_count, index_size) VALUES (?, ?)",
-            (count, index_size)
-        )
+        c.execute("INSERT INTO kb_metrics (doc_count, index_size) VALUES (?, ?)", (count, index_size))
         conn.commit()
         conn.close()
     except Exception as e:
         logger.error(f"Failed to record KB metrics: {e}")
 
 # ----------------------------------------------------------------------
-# Admin dashboard functions (CRUD and analytics)
+# Admin data functions
 # ----------------------------------------------------------------------
-def get_all_users() -> List[Dict[str, Any]]:
-    """Return list of all users (excluding password hash)."""
+def get_all_users():
     try:
         conn = sqlite3.connect(str(DB_PATH))
-        c = conn.cursor()
-        c.execute("SELECT id, username, is_admin, created_at FROM users ORDER BY id")
-        rows = c.fetchall()
+        df = pd.read_sql_query("SELECT id, username, is_admin, created_at FROM users ORDER BY id", conn)
         conn.close()
-        return [
-            {"id": r[0], "username": r[1], "is_admin": bool(r[2]), "created_at": r[3]}
-            for r in rows
-        ]
+        return df
     except Exception as e:
         logger.exception("Failed to fetch users")
-        return []
+        return pd.DataFrame()
 
-def get_user_message_counts() -> pd.DataFrame:
-    """Return per-user message statistics."""
+def get_user_message_counts():
     try:
         conn = sqlite3.connect(str(DB_PATH))
         query = """
-            SELECT 
-                u.username,
-                COUNT(a.id) as total_messages,
-                SUM(CASE WHEN a.success = 1 THEN 1 ELSE 0 END) as successful,
-                SUM(CASE WHEN a.success = 0 THEN 1 ELSE 0 END) as failed,
-                MAX(a.timestamp) as last_active
-            FROM users u
-            LEFT JOIN user_activity a ON u.id = a.user_id
+            SELECT u.username,
+                   COUNT(a.id) as total_messages,
+                   SUM(CASE WHEN a.success = 1 THEN 1 ELSE 0 END) as successful,
+                   SUM(CASE WHEN a.success = 0 THEN 1 ELSE 0 END) as failed,
+                   MAX(a.timestamp) as last_active
+            FROM users u LEFT JOIN user_activity a ON u.id = a.user_id
             GROUP BY u.id
             ORDER BY total_messages DESC
         """
         df = pd.read_sql_query(query, conn)
         conn.close()
-        logger.info(f"Fetched {len(df)} user message count rows")
         return df
     except Exception as e:
         logger.exception("Failed to get user message counts")
         return pd.DataFrame()
 
-def update_user(user_id: int, username: str, password: Optional[str], is_admin: bool) -> Tuple[bool, str]:
-    """Update user details. If password is None/empty, keep existing."""
+def update_user(user_id, username, password, is_admin):
     try:
         conn = sqlite3.connect(str(DB_PATH))
         c = conn.cursor()
         if password:
-            hashed = hash_password(password)
-            c.execute(
-                "UPDATE users SET username = ?, password_hash = ?, is_admin = ? WHERE id = ?",
-                (username, hashed, 1 if is_admin else 0, user_id)
-            )
+            hashed = bcrypt.hashpw(password.encode('utf-8'), bcrypt.gensalt()).decode('utf-8')
+            c.execute("UPDATE users SET username = ?, password_hash = ?, is_admin = ? WHERE id = ?",
+                      (username, hashed, 1 if is_admin else 0, user_id))
         else:
-            c.execute(
-                "UPDATE users SET username = ?, is_admin = ? WHERE id = ?",
-                (username, 1 if is_admin else 0, user_id)
-            )
+            c.execute("UPDATE users SET username = ?, is_admin = ? WHERE id = ?",
+                      (username, 1 if is_admin else 0, user_id))
         conn.commit()
         conn.close()
         return True, "User updated"
     except sqlite3.IntegrityError:
         return False, "Username already exists"
     except Exception as e:
-        logger.exception("Failed to update user")
+        logger.exception("Update user failed")
         return False, str(e)
 
-def delete_user(user_id: int) -> Tuple[bool, str]:
-    """Delete a user and their activity logs (cascade)."""
+def delete_user(user_id):
     try:
         conn = sqlite3.connect(str(DB_PATH))
         c = conn.cursor()
@@ -482,11 +394,10 @@ def delete_user(user_id: int) -> Tuple[bool, str]:
         conn.close()
         return True, "User deleted"
     except Exception as e:
-        logger.exception("Failed to delete user")
+        logger.exception("Delete user failed")
         return False, str(e)
 
-def create_user(username: str, password: str, is_admin: bool) -> Tuple[bool, str]:
-    """Create a new user."""
+def create_user(username, password, is_admin):
     if not username or not password:
         return False, "Username and password required"
     try:
@@ -496,29 +407,24 @@ def create_user(username: str, password: str, is_admin: bool) -> Tuple[bool, str
         if c.fetchone():
             conn.close()
             return False, "Username already exists"
-        hashed = hash_password(password)
-        c.execute(
-            "INSERT INTO users (username, password_hash, is_admin) VALUES (?, ?, ?)",
-            (username, hashed, 1 if is_admin else 0)
-        )
+        hashed = bcrypt.hashpw(password.encode('utf-8'), bcrypt.gensalt()).decode('utf-8')
+        c.execute("INSERT INTO users (username, password_hash, is_admin) VALUES (?, ?, ?)",
+                  (username, hashed, 1 if is_admin else 0))
         conn.commit()
         conn.close()
         return True, "User created"
     except Exception as e:
-        logger.exception("Failed to create user")
+        logger.exception("Create user failed")
         return False, str(e)
 
-def get_model_performance(days: int = 7) -> pd.DataFrame:
-    """Aggregate model performance over last N days."""
+def get_model_performance(days=7):
     try:
         conn = sqlite3.connect(str(DB_PATH))
         query = f"""
-            SELECT
-                model_key,
-                DATE(timestamp) as day,
-                COUNT(*) as requests,
-                AVG(response_time_ms) as avg_response,
-                SUM(CASE WHEN success = 0 THEN 1 ELSE 0 END) as errors
+            SELECT model_key, DATE(timestamp) as day,
+                   COUNT(*) as requests,
+                   AVG(response_time_ms) as avg_response,
+                   SUM(CASE WHEN success = 0 THEN 1 ELSE 0 END) as errors
             FROM user_activity
             WHERE timestamp >= datetime('now', '-{days} days')
             GROUP BY model_key, day
@@ -526,21 +432,18 @@ def get_model_performance(days: int = 7) -> pd.DataFrame:
         """
         df = pd.read_sql_query(query, conn)
         conn.close()
-        logger.info(f"Fetched {len(df)} model performance rows")
         return df
     except Exception as e:
         logger.exception("Failed to get model performance")
         return pd.DataFrame()
 
-def get_user_activity_summary(days: int = 30) -> pd.DataFrame:
-    """Daily active users over last N days."""
+def get_user_activity_summary(days=30):
     try:
         conn = sqlite3.connect(str(DB_PATH))
         query = f"""
-            SELECT
-                DATE(timestamp) as day,
-                COUNT(DISTINCT user_id) as active_users,
-                COUNT(*) as total_queries
+            SELECT DATE(timestamp) as day,
+                   COUNT(DISTINCT user_id) as active_users,
+                   COUNT(*) as total_queries
             FROM user_activity
             WHERE timestamp >= datetime('now', '-{days} days')
             GROUP BY day
@@ -548,84 +451,60 @@ def get_user_activity_summary(days: int = 30) -> pd.DataFrame:
         """
         df = pd.read_sql_query(query, conn)
         conn.close()
-        logger.info(f"Fetched {len(df)} user activity summary rows")
         return df
     except Exception as e:
         logger.exception("Failed to get user activity summary")
         return pd.DataFrame()
 
-def get_system_metrics_history(hours: int = 24) -> pd.DataFrame:
-    """System metrics over last N hours."""
+def get_system_metrics_history(hours=24):
     try:
         conn = sqlite3.connect(str(DB_PATH))
         query = f"""
-            SELECT
-                datetime(timestamp) as time,
-                cpu,
-                memory,
-                disk
+            SELECT datetime(timestamp) as time, cpu, memory, disk
             FROM system_metrics
             WHERE timestamp >= datetime('now', '-{hours} hours')
             ORDER BY timestamp
         """
         df = pd.read_sql_query(query, conn)
         conn.close()
-        logger.info(f"Fetched {len(df)} system metrics rows")
         return df
     except Exception as e:
         logger.exception("Failed to get system metrics history")
         return pd.DataFrame()
 
-def get_kb_history(days: int = 30) -> pd.DataFrame:
-    """Knowledge base size history."""
+def get_kb_history(days=30):
     try:
         conn = sqlite3.connect(str(DB_PATH))
         query = f"""
-            SELECT
-                datetime(timestamp) as time,
-                doc_count,
-                index_size
+            SELECT datetime(timestamp) as time, doc_count, index_size
             FROM kb_metrics
             WHERE timestamp >= datetime('now', '-{days} days')
             ORDER BY timestamp
         """
         df = pd.read_sql_query(query, conn)
         conn.close()
-        logger.info(f"Fetched {len(df)} KB history rows")
         return df
     except Exception as e:
         logger.exception("Failed to get KB history")
         return pd.DataFrame()
 
-def get_task_history(limit=100) -> pd.DataFrame:
-    """Return recent task history."""
+def get_task_history(limit=100):
     try:
         conn = sqlite3.connect(str(DB_PATH))
         query = f"""
-            SELECT 
-                task_id,
-                variant,
-                model,
-                status,
-                progress,
-                result_url,
-                error,
-                created_at,
-                completed_at
+            SELECT task_id, variant, model, status, progress, result_url, error, created_at, completed_at
             FROM tasks
             ORDER BY created_at DESC
             LIMIT {limit}
         """
         df = pd.read_sql_query(query, conn)
         conn.close()
-        logger.info(f"Fetched {len(df)} task history rows")
         return df
     except Exception as e:
         logger.exception("Failed to get task history")
         return pd.DataFrame()
 
-def get_database_stats() -> Dict[str, int]:
-    """Return row counts for main tables."""
+def get_database_stats():
     stats = {}
     try:
         conn = sqlite3.connect(str(DB_PATH))
@@ -640,7 +519,7 @@ def get_database_stats() -> Dict[str, int]:
     return stats
 
 # ----------------------------------------------------------------------
-# Session state initialization
+# Session state
 # ----------------------------------------------------------------------
 if "logged_in" not in st.session_state:
     st.session_state.logged_in = False
@@ -657,109 +536,81 @@ if "logged_in" not in st.session_state:
     st.session_state.uploaded_file = None
 
 # ----------------------------------------------------------------------
-# Login / Signup UI (if not logged in)
+# Login / Signup UI
 # ----------------------------------------------------------------------
 if not st.session_state.logged_in:
-    st.markdown("# 🚀 Yukti AI")
-    st.markdown("## Please log in to continue")
-
+    st.title("Yukti AI")
+    st.subheader("Please log in to continue")
     tab1, tab2 = st.tabs(["Login", "Sign Up"])
 
     with tab1:
         with st.form("login_form"):
             username = st.text_input("Username")
             password = st.text_input("Password", type="password")
-            submitted = st.form_submit_button("Login")
-            if submitted:
+            if st.form_submit_button("Login"):
                 success, user_id, is_admin = authenticate(username, password)
                 if success:
                     st.session_state.logged_in = True
                     st.session_state.user_id = user_id
                     st.session_state.username = username
                     st.session_state.is_admin = is_admin
-                    st.session_state.admin_mode = is_admin  # admin sees dashboard
+                    st.session_state.admin_mode = is_admin
                     st.rerun()
                 else:
                     st.error("Invalid username or password")
 
     with tab2:
         with st.form("signup_form"):
-            new_username = st.text_input("Choose Username")
-            new_password = st.text_input("Choose Password", type="password")
+            new_username = st.text_input("Username")
+            new_password = st.text_input("Password", type="password")
             confirm_password = st.text_input("Confirm Password", type="password")
-            submitted = st.form_submit_button("Sign Up")
-            if submitted:
+            if st.form_submit_button("Sign Up"):
                 if new_password != confirm_password:
                     st.error("Passwords do not match")
                 else:
-                    success, msg = register_user(new_username, new_password)
-                    if success:
+                    ok, msg = register_user(new_username, new_password)
+                    if ok:
                         st.success("Account created! Please log in.")
                         st.rerun()
                     else:
                         st.error(msg)
-    st.stop()  # Do not proceed to main app
+    st.stop()
 
 # ----------------------------------------------------------------------
-# Main app (after login)
+# Main app after login
 # ----------------------------------------------------------------------
-# Sidebar (common for both admin and normal users)
 with st.sidebar:
     st.markdown(f"### 👤 {st.session_state.username}")
     if st.button("🚪 Logout", use_container_width=True):
-        # Log out
-        for key in ["logged_in", "user_id", "username", "is_admin", "admin_mode", "messages", "tasks"]:
-            if key in st.session_state:
+        for key in list(st.session_state.keys()):
+            if key in ["logged_in", "user_id", "username", "is_admin", "admin_mode", "messages", "tasks"]:
                 del st.session_state[key]
         st.rerun()
 
     if st.session_state.is_admin:
-        # Admin toggle: switch between dashboard and chat
         admin_mode = st.checkbox("🛡️ Admin Mode", value=st.session_state.admin_mode)
         if admin_mode != st.session_state.admin_mode:
             st.session_state.admin_mode = admin_mode
             st.rerun()
 
-    # Model selector (visible to both, but admin can also see it in dashboard)
     st.markdown("## 🧠 Model")
-    try:
-        model_options = get_available_models()
-        if not model_options:
-            st.warning("No models available. Check API keys.")
-            model_options = ["Yukti‑Flash"]
-    except Exception as e:
-        st.error(f"Failed to fetch models: {e}")
-        logger.exception("get_available_models")
-        model_options = ["Yukti‑Flash"]
-
-    display_names = [
-        f"{m} – {MODELS.get(m, {}).get('description', 'No description')}"
-        for m in model_options
-    ]
-    selected_display = st.selectbox(
-        label="Select model",
-        options=display_names,
-        index=0,
-        key="model_display",
-        label_visibility="collapsed"
-    )
+    model_options = get_available_models() or ["Yukti‑Flash"]
+    display_names = [f"{m} – {MODELS.get(m, {}).get('description', 'No description')}" for m in model_options]
+    selected_display = st.selectbox("Select model", display_names, index=0, label_visibility="collapsed")
     selected_model = model_options[display_names.index(selected_display)]
     st.session_state.selected_model = selected_model
 
-    # File upload (only if model supports it)
     uploaded_file = None
     if selected_model in ["Yukti‑Video", "Yukti‑Image", "Yukti‑Audio"]:
         st.markdown("### 📎 Attach File")
         if selected_model == "Yukti‑Video":
-            uploaded_file = st.file_uploader("Upload image (optional)", type=["png", "jpg", "jpeg"])
+            uploaded_file = st.file_uploader("Upload image", type=["png", "jpg", "jpeg"])
         elif selected_model == "Yukti‑Image":
-            uploaded_file = st.file_uploader("Upload reference image (optional)", type=["png", "jpg", "jpeg"])
+            uploaded_file = st.file_uploader("Upload reference image", type=["png", "jpg", "jpeg"])
         elif selected_model == "Yukti‑Audio":
-            uploaded_file = st.file_uploader("Upload audio (optional)", type=["mp3", "wav"])
+            uploaded_file = st.file_uploader("Upload audio", type=["mp3", "wav"])
 
     st.divider()
-
-    # Knowledge base status
     st.markdown("### 📚 Knowledge Base")
     kb_status = st.session_state.kb_status
     if kb_status["ready"]:
@@ -768,20 +619,16 @@ with st.sidebar:
         st.markdown("❌ **Not Ready**")
         if kb_status["error"]:
             st.caption(f"Error: {kb_status['error']}")
-
     if st.button("🔄 Update KB", use_container_width=True):
         with st.spinner("Rebuilding..."):
-            success = create_vector_db()
-            if success:
+            if create_vector_db():
                 st.session_state.kb_status = get_kb_detailed_status()
                 st.success("Knowledge base updated")
                 st.rerun()
             else:
                 st.error("Update failed")
-
     st.divider()
 
-    # Tasks (only if Zhipu available)
     if ZHIPU_AVAILABLE:
         st.markdown("### 📋 Tasks")
         if st.button("⟳ Refresh Tasks", use_container_width=True):
@@ -790,23 +637,13 @@ with st.sidebar:
             active_tasks = get_active_tasks()
             for task_id, variant, status, progress in active_tasks:
                 if task_id not in st.session_state.tasks:
-                    st.session_state.tasks[task_id] = {
-                        "variant": variant,
-                        "status": status,
-                        "progress": progress,
-                        "result_url": None,
-                        "error": None
-                    }
+                    st.session_state.tasks[task_id] = {"variant": variant, "status": status, "progress": progress}
                 else:
-                    st.session_state.tasks[task_id].update({
-                        "status": status,
-                        "progress": progress
-                    })
+                    st.session_state.tasks[task_id].update({"status": status, "progress": progress})
         except Exception as e:
             st.warning(f"Could not fetch tasks: {e}")
-
-        for task_id in list(st.session_state.tasks.keys()):
-            render_task(task_id, st.session_state.tasks[task_id])
+        for task_id, info in st.session_state.tasks.items():
+            render_task(task_id, info)
         st.divider()
 
     if st.button("🗑️ Clear Chat", use_container_width=True):
@@ -815,55 +652,36 @@ with st.sidebar:
         st.rerun()
 
 # ----------------------------------------------------------------------
-# Routing: Admin Dashboard or Normal Chat
+# Admin dashboard or chat
 # ----------------------------------------------------------------------
 if st.session_state.admin_mode:
     # -------------------- Admin Dashboard --------------------
     st.title("🛡️ Admin Dashboard")
     st.caption(f"Logged in as {st.session_state.username} (Admin)")
 
-    # Record metrics periodically (every 5 minutes, but we'll just do it on dashboard load)
-    # For real‑time, we'll refresh within the dashboard
     record_system_metrics()
     record_kb_metrics()
 
-    # Database diagnostics (for debugging)
-    with st.expander("🔍 Database Diagnostics (click to expand)"):
-        db_stats = get_database_stats()
-        col1, col2, col3, col4, col5 = st.columns(5)
-        col1.metric("Users", db_stats.get("users", 0))
-        col2.metric("User Activity", db_stats.get("user_activity", 0))
-        col3.metric("Tasks", db_stats.get("tasks", 0))
-        col4.metric("System Metrics", db_stats.get("system_metrics", 0))
-        col5.metric("KB Metrics", db_stats.get("kb_metrics", 0))
-        st.caption("If these counts are zero, the corresponding tables are empty – that's normal on a fresh install.")
+    with st.expander("🔍 Database Diagnostics"):
+        stats = get_database_stats()
+        cols = st.columns(5)
+        cols[0].metric("Users", stats.get("users", 0))
+        cols[1].metric("User Activity", stats.get("user_activity", 0))
+        cols[2].metric("Tasks", stats.get("tasks", 0))
+        cols[3].metric("System Metrics", stats.get("system_metrics", 0))
+        cols[4].metric("KB Metrics", stats.get("kb_metrics", 0))
 
-    # Create tabs
-    tabs = st.tabs([
-        "📊 Overview",
-        "👥 Users",
-        "📈 Analytics",
-        "📚 Knowledge Base",
-        "📋 Tasks",
-        "🤖 Agentic Insights",
-        "⚙️ System"
-    ])
+    tabs = st.tabs(["📊 Overview", "👥 Users", "📈 Analytics", "📚 Knowledge Base", "📋 Tasks", "🤖 Insights", "⚙️ System"])
 
-    # --- Overview Tab ---
     with tabs[0]:
-        st.subheader("System Status Overview")
-
-        # Quick stats
+        st.subheader("System Status")
         col1, col2, col3, col4 = st.columns(4)
         with col1:
-            total_users = len(get_all_users())
-            st.metric("Total Users", total_users)
+            st.metric("Total Users", len(get_all_users()))
         with col2:
-            kb_docs = get_document_count() or 0
-            st.metric("Knowledge Base Docs", kb_docs)
+            st.metric("KB Docs", get_document_count() or 0)
         with col3:
-            active_tasks_count = len(get_active_tasks())
-            st.metric("Active Tasks", active_tasks_count)
+            st.metric("Active Tasks", len(get_active_tasks()))
         with col4:
             if VECTORDB_PATH.exists():
                 mtime = datetime.fromtimestamp(VECTORDB_PATH.stat().st_mtime)
@@ -871,420 +689,293 @@ if st.session_state.admin_mode:
             else:
                 st.metric("Last KB Update", "Never")
 
-        # Real‑time system metrics (updates every 2 seconds)
-        metrics_placeholder = st.empty()
+        placeholder = st.empty()
         while st.session_state.admin_mode:
-            with metrics_placeholder.container():
-                sys_metrics = get_system_metrics()
+            with placeholder.container():
+                sys = get_system_metrics()
                 cols = st.columns(3)
-                cols[0].metric("CPU Usage", f"{sys_metrics['cpu']:.1f}%")
-                cols[1].metric("Memory Usage", f"{sys_metrics['memory']:.1f}%")
-                cols[2].metric("Disk Usage", f"{sys_metrics['disk']:.1f}%")
+                cols[0].metric("CPU", f"{sys['cpu']:.1f}%")
+                cols[1].metric("Memory", f"{sys['memory']:.1f}%")
+                cols[2].metric("Disk", f"{sys['disk']:.1f}%")
             time.sleep(2)
             st.rerun()
 
-    # --- Users Tab (CRUD) ---
     with tabs[1]:
         st.subheader("User Management")
-
-        # Add new user form
-        with st.expander("➕ Add New User"):
-            with st.form("add_user_form"):
-                new_username = st.text_input("Username")
-                new_password = st.text_input("Password", type="password")
-                new_confirm = st.text_input("Confirm Password", type="password")
-                new_is_admin = st.checkbox("Admin privileges")
-                if st.form_submit_button("Create User"):
-                    if new_password != new_confirm:
+        with st.expander("➕ Add User"):
+            with st.form("add_user"):
+                u = st.text_input("Username")
+                p = st.text_input("Password", type="password")
+                pc = st.text_input("Confirm", type="password")
+                admin = st.checkbox("Admin")
+                if st.form_submit_button("Create"):
+                    if p != pc:
                         st.error("Passwords do not match")
                     else:
-                        ok, msg = create_user(new_username, new_password, new_is_admin)
+                        ok, msg = create_user(u, p, admin)
                         if ok:
-                            log_admin_action(st.session_state.user_id, "CREATE_USER", new_username)
+                            log_admin_action(st.session_state.user_id, "CREATE_USER", u)
                             st.success("User created")
                             st.rerun()
                         else:
                             st.error(msg)
 
-        # User table with message stats
         users_df = get_user_message_counts()
         if not users_df.empty:
             st.dataframe(users_df, use_container_width=True)
-
-            # Edit/Delete for each user
-            for idx, row in users_df.iterrows():
+            for _, row in users_df.iterrows():
                 if row["username"] == st.session_state.username:
-                    continue  # cannot edit yourself here
+                    continue
                 with st.expander(f"Edit {row['username']}"):
                     col1, col2 = st.columns(2)
                     with col1:
-                        new_username = st.text_input("Username", value=row["username"], key=f"user_{row['username']}_name")
-                        new_is_admin = st.checkbox("Admin", value=row.get("is_admin", False), key=f"user_{row['username']}_admin")
+                        new_name = st.text_input("Username", value=row["username"], key=f"name_{row['username']}")
+                        new_admin = st.checkbox("Admin", value=row.get("is_admin", False), key=f"admin_{row['username']}")
                     with col2:
-                        new_password = st.text_input("New Password (leave blank to keep)", type="password", key=f"user_{row['username']}_pass")
-                        if st.button("Update", key=f"user_{row['username']}_update"):
-                            # Need user_id – we have to fetch it separately
-                            user_id = None
-                            for u in get_all_users():
-                                if u["username"] == row["username"]:
-                                    user_id = u["id"]
-                                    break
-                            if user_id:
-                                ok, msg = update_user(user_id, new_username, new_password or None, new_is_admin)
-                                if ok:
-                                    log_admin_action(st.session_state.user_id, "UPDATE_USER", new_username)
-                                    st.success("User updated")
-                                    st.rerun()
-                                else:
-                                    st.error(msg)
+                        new_pass = st.text_input("New Password (blank to keep)", type="password", key=f"pass_{row['username']}")
+                        if st.button("Update", key=f"upd_{row['username']}"):
+                            uid = users_df[users_df["username"] == row["username"]].iloc[0]["id"]
+                            ok, msg = update_user(uid, new_name, new_pass or None, new_admin)
+                            if ok:
+                                log_admin_action(st.session_state.user_id, "UPDATE_USER", new_name)
+                                st.success("Updated")
+                                st.rerun()
                             else:
-                                st.error("User not found")
-                    if st.button("Delete", key=f"user_{row['username']}_delete"):
-                        # Confirm
-                        if st.checkbox("Confirm deletion", key=f"confirm_{row['username']}"):
-                            user_id = None
-                            for u in get_all_users():
-                                if u["username"] == row["username"]:
-                                    user_id = u["id"]
-                                    break
-                            if user_id:
-                                ok, msg = delete_user(user_id)
-                                if ok:
-                                    log_admin_action(st.session_state.user_id, "DELETE_USER", row["username"])
-                                    st.success("User deleted")
-                                    st.rerun()
-                                else:
-                                    st.error(msg)
+                                st.error(msg)
+                    if st.button("Delete", key=f"del_{row['username']}"):
+                        if st.checkbox(f"Confirm delete {row['username']}", key=f"conf_{row['username']}"):
+                            uid = users_df[users_df["username"] == row["username"]].iloc[0]["id"]
+                            ok, msg = delete_user(uid)
+                            if ok:
+                                log_admin_action(st.session_state.user_id, "DELETE_USER", row["username"])
+                                st.success("Deleted")
+                                st.rerun()
                             else:
-                                st.error("User not found")
+                                st.error(msg)
         else:
-            st.info("No users found in database.")
+            st.info("No users found.")
 
-    # --- Analytics Tab ---
     with tabs[2]:
-        st.subheader("Model Performance (Last 7 Days)")
-        perf_df = get_model_performance(7)
-        if not perf_df.empty:
-            fig = px.line(perf_df, x="day", y="requests", color="model_key", title="Daily Requests per Model")
-            st.plotly_chart(fig, use_container_width=True)
-
-            fig2 = px.line(perf_df, x="day", y="avg_response", color="model_key", title="Avg Response Time (ms)")
+        st.subheader("Model Performance")
+        perf = get_model_performance(7)
+        if not perf.empty:
+            fig1 = px.line(perf, x="day", y="requests", color="model_key", title="Daily Requests")
+            st.plotly_chart(fig1, use_container_width=True)
+            fig2 = px.line(perf, x="day", y="avg_response", color="model_key", title="Avg Response Time (ms)")
             st.plotly_chart(fig2, use_container_width=True)
-
-            fig3 = px.bar(perf_df, x="day", y="errors", color="model_key", title="Daily Errors")
+            fig3 = px.bar(perf, x="day", y="errors", color="model_key", title="Daily Errors")
             st.plotly_chart(fig3, use_container_width=True)
         else:
-            st.info("No performance data yet. Start using the chat to generate data.")
+            st.info("No performance data yet.")
 
-        st.subheader("User Activity (Last 30 Days)")
-        activity_df = get_user_activity_summary(30)
-        if not activity_df.empty:
-            fig4 = px.line(activity_df, x="day", y="active_users", title="Daily Active Users")
-            st.plotly_chart(fig4, use_container_width=True)
-            fig5 = px.line(activity_df, x="day", y="total_queries", title="Daily Queries")
-            st.plotly_chart(fig5, use_container_width=True)
+        st.subheader("User Activity")
+        act = get_user_activity_summary(30)
+        if not act.empty:
+            fig4 = px.line(act, x="day", y="active_users", title="Daily Active Users")
+            st.plotly_chart(fig4)
+            fig5 = px.line(act, x="day", y="total_queries", title="Daily Queries")
+            st.plotly_chart(fig5)
         else:
-            st.info("No activity data yet. Users need to interact with the chat.")
+            st.info("No activity data yet.")
 
-        st.subheader("System Metrics History (Last 24h)")
-        sys_df = get_system_metrics_history(24)
-        if not sys_df.empty:
-            fig6 = px.line(sys_df, x="time", y=["cpu", "memory", "disk"], title="System Resources")
-            st.plotly_chart(fig6, use_container_width=True)
+        st.subheader("System Metrics History")
+        sys_hist = get_system_metrics_history(24)
+        if not sys_hist.empty:
+            fig6 = px.line(sys_hist, x="time", y=["cpu", "memory", "disk"], title="System Resources")
+            st.plotly_chart(fig6)
         else:
-            st.info("No system metrics yet. The dashboard records metrics automatically over time.")
+            st.info("No system metrics yet.")
 
-    # --- Knowledge Base Tab ---
     with tabs[3]:
-        st.subheader("Knowledge Base Analytics")
+        st.subheader("Knowledge Base")
         col1, col2 = st.columns(2)
         with col1:
-            st.metric("Current Documents", get_document_count() or 0)
+            st.metric("Documents", get_document_count() or 0)
         with col2:
             if VECTORDB_PATH.exists():
-                size_mb = sum(f.stat().st_size for f in VECTORDB_PATH.glob("*") if f.is_file()) / (1024*1024)
-                st.metric("Index Size", f"{size_mb:.2f} MB")
+                size = sum(f.stat().st_size for f in VECTORDB_PATH.glob("*") if f.is_file()) / (1024*1024)
+                st.metric("Index Size", f"{size:.2f} MB")
             else:
                 st.metric("Index Size", "N/A")
-
-        kb_df = get_kb_history(30)
-        if not kb_df.empty:
-            fig = px.line(kb_df, x="time", y="doc_count", title="Document Count Over Time")
-            st.plotly_chart(fig, use_container_width=True)
+        kb_hist = get_kb_history(30)
+        if not kb_hist.empty:
+            fig = px.line(kb_hist, x="time", y="doc_count", title="Document Count Over Time")
+            st.plotly_chart(fig)
         else:
-            st.info("No KB history yet. Rebuild the knowledge base to start tracking.")
-
-        if st.button("🔄 Rebuild Knowledge Base Now"):
-            if st.checkbox("Confirm rebuild – this may take a few minutes"):
+            st.info("No KB history yet.")
+        if st.button("🔄 Rebuild Now"):
+            if st.checkbox("Confirm rebuild"):
                 with st.spinner("Rebuilding..."):
-                    success = create_vector_db()
-                    if success:
+                    if create_vector_db():
                         st.session_state.kb_status = get_kb_detailed_status()
                         record_kb_metrics()
                         log_admin_action(st.session_state.user_id, "REBUILD_KB")
-                        st.success("Knowledge base rebuilt")
+                        st.success("Rebuilt")
                         st.rerun()
                     else:
                         st.error("Rebuild failed")
 
-    # --- Tasks Tab ---
     with tabs[4]:
         st.subheader("Active Tasks")
         active = get_active_tasks()
         if active:
-            for task_id, variant, status, progress in active:
-                with st.container():
-                    cols = st.columns([2, 2, 2, 2])
-                    cols[0].write(f"**{variant}**")
-                    cols[1].write(f"`{task_id[:8]}`")
-                    cols[2].write(status)
-                    if status == 'processing':
-                        cols[3].progress(progress/100, text=f"{progress}%")
-                    else:
-                        cols[3].write("—")
+            for task_id, variant, status, prog in active:
+                cols = st.columns([2,2,2,2])
+                cols[0].write(f"**{variant}**")
+                cols[1].write(f"`{task_id[:8]}`")
+                cols[2].write(status)
+                if status == 'processing':
+                    cols[3].progress(prog/100)
+                else:
+                    cols[3].write("—")
         else:
-            st.info("No active tasks at the moment.")
-
-        st.subheader("Task History (Last 100)")
-        task_history = get_task_history(100)
-        if not task_history.empty:
-            st.dataframe(task_history, use_container_width=True)
+            st.info("No active tasks.")
+        st.subheader("Task History")
+        hist = get_task_history(100)
+        if not hist.empty:
+            st.dataframe(hist)
         else:
             st.info("No task history yet.")
 
-    # --- Agentic Insights Tab ---
     with tabs[5]:
-        st.subheader("AI‑Powered Insights")
-
-        # Anomaly detection (simple)
-        perf_df = get_model_performance(1)  # last 24h
-        if not perf_df.empty:
-            avg_error_rate = perf_df['errors'].sum() / max(perf_df['requests'].sum(), 1)
-            if avg_error_rate > 0.1:
-                st.warning(f"⚠️ High error rate ({avg_error_rate:.1%}) in the last 24h.")
+        st.subheader("AI Insights")
+        perf = get_model_performance(1)
+        if not perf.empty:
+            err_rate = perf['errors'].sum() / max(perf['requests'].sum(), 1)
+            if err_rate > 0.1:
+                st.warning(f"High error rate ({err_rate:.1%}) in last 24h")
             else:
-                st.success("✅ Error rates normal.")
-        else:
-            st.info("Not enough performance data to detect anomalies.")
-
-        # Load prediction (simple linear regression)
-        activity_df = get_user_activity_summary(14)
-        if len(activity_df) > 5:
-            # Very simple forecast: average of last 7 days
-            last_7_avg = activity_df.tail(7)['total_queries'].mean()
-            st.info(f"📈 Forecast: ~{int(last_7_avg)} queries per day next week.")
-        else:
-            st.info("Not enough activity data for forecast.")
-
-        # Recommendations
+                st.success("Error rates normal")
+        act = get_user_activity_summary(14)
+        if len(act) > 5:
+            avg = act.tail(7)['total_queries'].mean()
+            st.info(f"Forecast: ~{int(avg)} queries/day next week")
         st.subheader("Recommendations")
         recs = []
-
-        # Check knowledge base age
         if VECTORDB_PATH.exists():
-            mtime = datetime.fromtimestamp(VECTORDB_PATH.stat().st_mtime)
-            if (datetime.now() - mtime) > timedelta(days=7):
-                recs.append(("Knowledge base is over 7 days old. Consider rebuilding.", "Rebuild Now", "REBUILD_KB"))
-
-        # Check system load
-        sys_metrics = get_system_metrics()
-        if sys_metrics["cpu"] > 80:
-            recs.append(("CPU usage >80%. Consider scaling up.", None, None))
-        if sys_metrics["memory"] > 80:
-            recs.append(("Memory usage >80%. Consider increasing RAM.", None, None))
-
-        # Check concurrency limits
-        active_tasks = get_active_tasks()
-        if len(active_tasks) > 10:
-            recs.append(("High number of active tasks. Check for stuck tasks.", "Clear Stale Tasks", "CLEAR_TASKS"))
-
+            age = datetime.now() - datetime.fromtimestamp(VECTORDB_PATH.stat().st_mtime)
+            if age.days > 7:
+                recs.append(("KB is >7 days old. Rebuild?", "Rebuild"))
+        sys = get_system_metrics()
+        if sys["cpu"] > 80:
+            recs.append(("CPU >80%. Scale up?", None))
+        if sys["memory"] > 80:
+            recs.append(("Memory >80%. Increase RAM?", None))
         if recs:
-            for rec, action, action_code in recs:
-                cols = st.columns([4, 1])
-                cols[0].write(f"• {rec}")
-                if action:
-                    if cols[1].button(action, key=f"rec_{hash(rec)}"):
-                        if action_code == "REBUILD_KB":
-                            with st.spinner("Rebuilding..."):
-                                success = create_vector_db()
-                                if success:
-                                    st.session_state.kb_status = get_kb_detailed_status()
-                                    record_kb_metrics()
-                                    log_admin_action(st.session_state.user_id, "REBUILD_KB")
-                                    st.success("Knowledge base rebuilt")
-                                    st.rerun()
-                                else:
-                                    st.error("Rebuild failed")
-                        elif action_code == "CLEAR_TASKS":
-                            st.info("Clear tasks not implemented yet.")
+            for r, _ in recs:
+                st.write(f"• {r}")
         else:
-            st.success("All systems nominal.")
+            st.success("All systems nominal")
 
-    # --- System Tab ---
     with tabs[6]:
         st.subheader("System Control")
-        if st.button("📥 Export Analytics Data"):
-            # Export all analytics tables as Excel
+        if st.button("📥 Export Analytics"):
             import io
-            output = io.BytesIO()
-            with pd.ExcelWriter(output, engine='xlsxwriter') as writer:
-                get_model_performance(30).to_excel(writer, sheet_name="Model Performance")
-                get_user_activity_summary(30).to_excel(writer, sheet_name="User Activity")
-                get_system_metrics_history(24).to_excel(writer, sheet_name="System Metrics")
-                get_kb_history(30).to_excel(writer, sheet_name="KB History")
-                get_task_history(100).to_excel(writer, sheet_name="Task History")
-            st.download_button(
-                "Download Export",
-                data=output.getvalue(),
-                file_name=f"yukti_analytics_{datetime.now().strftime('%Y%m%d')}.xlsx",
-                mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet"
-            )
-
+            out = io.BytesIO()
+            with pd.ExcelWriter(out, engine='xlsxwriter') as w:
+                get_model_performance(30).to_excel(w, sheet_name="Model")
+                get_user_activity_summary(30).to_excel(w, sheet_name="Activity")
+                get_system_metrics_history(24).to_excel(w, sheet_name="System")
+                get_kb_history(30).to_excel(w, sheet_name="KB")
+                get_task_history(100).to_excel(w, sheet_name="Tasks")
+            st.download_button("Download", data=out.getvalue(), file_name=f"yukti_export_{datetime.now():%Y%m%d}.xlsx")
         st.subheader("Log Viewer")
-        log_viewer("updater.log", max_lines=50)
+        log_viewer("updater.log", 50)
 
-    # Stop here so chat doesn't render
     st.stop()
 
 else:
-    # -------------------- Normal Chat Interface --------------------
-    # Display chat messages
+    # -------------------- Chat Interface --------------------
     for msg in st.session_state.messages:
         with st.chat_message(msg["role"]):
             st.markdown(msg["content"])
             if "media" in msg:
-                for media in msg["media"]:
-                    if media["type"] == "image":
-                        st.image(media["url"], width=300)
-                    elif media["type"] == "audio":
-                        st.audio(media["url"])
-                    elif media["type"] == "video":
-                        st.video(media["url"])
+                for m in msg["media"]:
+                    if m["type"] == "image":
+                        st.image(m["url"], width=300)
+                    elif m["type"] == "audio":
+                        st.audio(m["url"])
+                    elif m["type"] == "video":
+                        st.video(m["url"])
 
-    # Chat input
     if prompt := st.chat_input("Type your message..."):
-        # Process message
-        start_time = time.time()
+        start = time.time()
         st.session_state.processing = True
-
-        # Get uploaded file if any
-        uploaded_file_obj = None
-        if uploaded_file is not None:
-            # Save to temp file
+        uploaded = None
+        if uploaded_file:
             import tempfile
             with tempfile.NamedTemporaryFile(delete=False, suffix=Path(uploaded_file.name).suffix) as tmp:
                 tmp.write(uploaded_file.getvalue())
-                uploaded_file_obj = tmp.name
+                uploaded = tmp.name
 
-        # Detect language
         lang_info = detect_language(prompt)
-        target_lang = lang_info['language']
         if lang_info['explicit_instruction']:
             st.session_state.conversation_language = lang_info['explicit_instruction']
         elif st.session_state.conversation_language is None:
-            st.session_state.conversation_language = target_lang
+            st.session_state.conversation_language = lang_info['language']
 
-        # Add user message to history
         st.session_state.messages.append({"role": "user", "content": prompt})
         with st.chat_message("user"):
             st.markdown(prompt)
 
-        # Generate assistant response
         with st.chat_message("assistant"):
-            response_placeholder = st.empty()
+            placeholder = st.empty()
             try:
                 model_key = st.session_state.selected_model
-                extra_kwargs = {}
-                if uploaded_file_obj:
-                    extra_kwargs["image_url"] = uploaded_file_obj
+                extra = {}
+                if uploaded:
+                    extra["image_url"] = uploaded
 
                 if model_key in ["Yukti‑Flash", "Yukti‑Quantum"]:
                     if not check_kb_status():
-                        answer = "Knowledge base not ready. Please update it first."
-                        response_placeholder.markdown(answer)
-                        result = {"type": "sync", "answer": answer}
+                        ans = "KB not ready. Update first."
+                        placeholder.markdown(ans)
+                        result = {"type": "sync", "answer": ans}
                     else:
-                        history = [
-                            {"role": m["role"], "content": m["content"]}
-                            for m in st.session_state.messages[-10:]
-                        ]
-                        result = think(prompt, history, model_key, language=st.session_state.conversation_language)
+                        hist = [{"role": m["role"], "content": m["content"]} for m in st.session_state.messages[-10:]]
+                        result = think(prompt, hist, model_key, language=st.session_state.conversation_language)
                 else:
-                    # Generation models
                     model = load_model(model_key)
                     if model_key == "Yukti‑Audio":
-                        audio_path = model.invoke(prompt, voice="female", language=st.session_state.conversation_language, **extra_kwargs)
-                        with open(audio_path, "rb") as f:
-                            audio_bytes = f.read()
-                        st.audio(audio_bytes, format="audio/wav")
-                        st.download_button("📥 Download Audio", data=audio_bytes, file_name="yukti_audio.wav")
-                        answer = "Audio generated."
-                        result = {"type": "sync", "answer": answer, "media": [{"type": "audio", "url": audio_path}]}
+                        path = model.invoke(prompt, voice="female", language=st.session_state.conversation_language, **extra)
+                        with open(path, "rb") as f:
+                            audio = f.read()
+                        st.audio(audio)
+                        st.download_button("Download Audio", audio, "audio.wav")
+                        ans = "Audio generated."
+                        result = {"type": "sync", "answer": ans, "media": [{"type": "audio", "url": path}]}
                     elif model_key == "Yukti‑Image":
-                        image_url = model.invoke(prompt, **extra_kwargs)
-                        st.image(image_url, width=300)
-                        st.download_button("📥 Download Image", data=requests.get(image_url).content, file_name="yukti_image.png")
-                        answer = "Image generated."
-                        result = {"type": "sync", "answer": answer, "media": [{"type": "image", "url": image_url}]}
+                        url = model.invoke(prompt, **extra)
+                        st.image(url, width=300)
+                        st.download_button("Download Image", requests.get(url).content, "image.png")
+                        ans = "Image generated."
+                        result = {"type": "sync", "answer": ans, "media": [{"type": "image", "url": url}]}
                     elif model_key == "Yukti‑Video":
-                        task_id = model.invoke(prompt, language=st.session_state.conversation_language, **extra_kwargs)
-                        st.session_state.tasks[task_id] = {
-                            "variant": "Yukti‑Video",
-                            "status": "submitted",
-                            "progress": 0,
-                            "result_url": None,
-                            "error": None
-                        }
-                        answer = f"Video task started: `{task_id}`"
-                        result = {"type": "async", "task_id": task_id}
+                        tid = model.invoke(prompt, language=st.session_state.conversation_language, **extra)
+                        st.session_state.tasks[tid] = {"variant": "Yukti‑Video", "status": "submitted", "progress": 0}
+                        ans = f"Task {tid} started."
+                        result = {"type": "async", "task_id": tid}
                     else:
-                        history = [
-                            {"role": m["role"], "content": m["content"]}
-                            for m in st.session_state.messages[-10:]
-                        ]
-                        result = think(prompt, history, model_key, language=st.session_state.conversation_language)
+                        hist = [{"role": m["role"], "content": m["content"]} for m in st.session_state.messages[-10:]]
+                        result = think(prompt, hist, model_key, language=st.session_state.conversation_language)
 
                 if result.get("type") == "sync":
-                    answer = result.get("answer", "")
+                    ans = result.get("answer", "")
                     if result.get("monologue"):
-                        with st.expander("Show reasoning"):
+                        with st.expander("Reasoning"):
                             st.markdown(result["monologue"])
-                    response_placeholder.markdown(answer)
-                    # Log activity
-                    elapsed = int((time.time() - start_time) * 1000)
-                    log_user_activity(
-                        st.session_state.user_id,
-                        model_key,
-                        len(prompt),
-                        elapsed,
-                        True
-                    )
-                    # Store in session
-                    st.session_state.messages.append({
-                        "role": "assistant",
-                        "content": answer,
-                        "media": result.get("media", [])
-                    })
+                    placeholder.markdown(ans)
+                    log_user_activity(st.session_state.user_id, model_key, len(prompt),
+                                      int((time.time()-start)*1000), True)
+                    st.session_state.messages.append({"role": "assistant", "content": ans, "media": result.get("media", [])})
                 elif result.get("type") == "async":
-                    st.info(f"Task {result['task_id']} submitted. Check sidebar for progress.")
-                    st.session_state.messages.append({
-                        "role": "assistant",
-                        "content": answer
-                    })
-
+                    st.info(f"Task {result['task_id']} submitted. Check sidebar.")
+                    st.session_state.messages.append({"role": "assistant", "content": ans})
             except Exception as e:
-                st.error(f"An error occurred: {e}")
+                st.error(f"Error: {e}")
                 logger.exception("Chat error")
-                # Log failure
-                elapsed = int((time.time() - start_time) * 1000)
-                log_user_activity(
-                    st.session_state.user_id,
-                    st.session_state.selected_model,
-                    len(prompt),
-                    elapsed,
-                    False,
-                    str(e)
-                )
+                log_user_activity(st.session_state.user_id, model_key, len(prompt),
+                                  int((time.time()-start)*1000), False, str(e))
 
         st.session_state.processing = False
         st.rerun()

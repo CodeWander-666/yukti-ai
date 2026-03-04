@@ -115,6 +115,7 @@ try:
 except ImportError:
     KB_UPDATER_AVAILABLE = False
     def rebuild_index(): return False
+    KB_SOURCES = {"rss": [], "api": []}   # fallback to prevent NameError
 
 # Configure logging
 logging.basicConfig(level=logging.INFO, format='%(asctime)s - %(name)s - %(levelname)s - %(message)s')

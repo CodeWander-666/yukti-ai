@@ -1,9 +1,9 @@
 """
 Core builder for FAISS index – fetches sources, deduplicates, and atomically replaces index.
 """
-
 import logging
 import shutil
+import sys
 import tempfile
 from pathlib import Path
 from typing import List
@@ -13,7 +13,13 @@ from langchain_core.documents import Document
 
 from .connectors import fetch_all_sources
 from .config import VECTORDB_PATH
-from src.embeddings import get_embeddings  # reuse embedding loader
+
+# Add project root to path to import src.embeddings
+BASE_DIR = Path(__file__).parent.parent.parent.absolute()
+if str(BASE_DIR) not in sys.path:
+    sys.path.insert(0, str(BASE_DIR))
+
+from src.embeddings import get_embeddings
 
 logger = logging.getLogger(__name__)
 
@@ -22,7 +28,6 @@ def deduplicate_documents(docs: List[Document]) -> List[Document]:
     seen = set()
     unique = []
     for doc in docs:
-        # Use content hash as key
         h = hash(doc.page_content)
         if h not in seen:
             seen.add(h)
@@ -68,8 +73,5 @@ def rebuild_index() -> bool:
 
         shutil.move(str(tmp_path), str(VECTORDB_PATH))
         logger.info(f"New index deployed to {VECTORDB_PATH}")
-
-    # Clean up uploads folder (optional) – move processed files to archive
-    # For simplicity, we keep them; you may implement archiving later.
 
     return True

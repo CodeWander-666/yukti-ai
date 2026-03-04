@@ -17,7 +17,7 @@ from .connectors import fetch_all_sources
 from .config import VECTORDB_PATH
 
 # Add project root to path to import src.embeddings
-BASE_DIR = Path(__file__).parent.parent.absolute()
+BASE_DIR = Path(__file__).parent.parent.parent.absolute()
 if str(BASE_DIR) not in sys.path:
     sys.path.insert(0, str(BASE_DIR))
 

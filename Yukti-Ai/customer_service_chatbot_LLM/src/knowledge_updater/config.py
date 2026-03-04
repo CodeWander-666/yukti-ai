@@ -1,9 +1,14 @@
-# knowledge_updater/config.py
+"""
+Configuration for knowledge updater – defines paths and data sources.
+"""
 import os
+import sys
 from pathlib import Path
 
-# Project root (go up from src/knowledge_updater/ to project root)
+# Add project root to path to allow imports from src
 BASE_DIR = Path(__file__).parent.parent.parent.absolute()
+if str(BASE_DIR) not in sys.path:
+    sys.path.insert(0, str(BASE_DIR))
 
 # Paths
 DATASET_PATH = BASE_DIR / "dataset" / "dataset.csv"
@@ -21,6 +26,7 @@ SOURCES = {
     "api": [
         {"name": "Example API", "url": "https://api.example.com/posts", "enabled": False},
     ],
+    # Websites are loaded from web_sources.json (created by admin)
 }
 
 UPDATE_INTERVAL = 3600  # 1 hour

@@ -10,7 +10,8 @@ from pathlib import Path
 
 logger = logging.getLogger(__name__)
 
-BASE_DIR = Path(__file__).parent.parent.absolute()
+# Project root: go up three levels from this file (src/knowledge_updater/ -> project root)
+BASE_DIR = Path(__file__).parent.parent.parent.absolute()
 
 # Paths
 DATASET_PATH = BASE_DIR / "dataset" / "dataset.csv"

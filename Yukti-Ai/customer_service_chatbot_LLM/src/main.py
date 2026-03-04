@@ -13,6 +13,7 @@ import time
 import logging
 import sqlite3
 import threading
+import json
 from pathlib import Path
 from datetime import datetime, timedelta
 from typing import Dict, Any, Optional, List, Tuple
@@ -48,6 +49,10 @@ except ImportError:
     TASK_POLL_INTERVAL = 5
     ZHIPU_API_KEY = os.getenv("ZHIPU_API_KEY", "")
     GOOGLE_API_KEY = os.getenv("GOOGLE_API_KEY", "")
+
+# Define UPLOADS_PATH (must be before any thread uses it)
+UPLOADS_PATH = BASE_DIR / "data" / "uploads"
+UPLOADS_PATH.mkdir(parents=True, exist_ok=True)
 
 try:
     from langchain_helper import (
@@ -105,13 +110,11 @@ except ImportError:
 # Import knowledge updater components
 try:
     from knowledge_updater.builder import rebuild_index
-    from knowledge_updater.config import UPLOADS_PATH, SOURCES as KB_SOURCES
+    from knowledge_updater.config import SOURCES as KB_SOURCES
     KB_UPDATER_AVAILABLE = True
 except ImportError:
     KB_UPDATER_AVAILABLE = False
     def rebuild_index(): return False
-    # Fallback definition to prevent NameError in updater thread
-    UPLOADS_PATH = BASE_DIR / "data" / "uploads"
 
 # Configure logging
 logging.basicConfig(level=logging.INFO, format='%(asctime)s - %(name)s - %(levelname)s - %(message)s')
@@ -600,19 +603,18 @@ def get_database_stats():
 # ----------------------------------------------------------------------
 def load_web_sources():
     """Load web scraping sources from JSON file (if exists)."""
-    config_file = PROJECT_ROOT / "knowledge_updater" / "web_sources.json"
+    config_file = Path(__file__).parent.parent / "knowledge_updater" / "web_sources.json"
     if config_file.exists():
         try:
             with open(config_file, 'r') as f:
                 return json.load(f)
         except Exception as e:
             logger.error(f"Failed to load web sources: {e}")
-    # Default structure
     return {"websites": []}
 
 def save_web_sources(sources):
     """Save web scraping sources to JSON file."""
-    config_file = PROJECT_ROOT / "knowledge_updater" / "web_sources.json"
+    config_file = Path(__file__).parent.parent / "knowledge_updater" / "web_sources.json"
     try:
         config_file.parent.mkdir(parents=True, exist_ok=True)
         with open(config_file, 'w') as f:
@@ -646,7 +648,7 @@ class KnowledgeBaseUpdater(threading.Thread):
 
     def _check_and_rebuild(self):
         """Check if any source file has changed; if so, rebuild."""
-        # Check dataset.csv (correct path)
+        # Check dataset.csv (correct path: PROJECT_ROOT/dataset/dataset.csv)
         dataset_path = PROJECT_ROOT / "dataset" / "dataset.csv"
         if dataset_path.exists():
             mtime = dataset_path.stat().st_mtime
@@ -656,7 +658,7 @@ class KnowledgeBaseUpdater(threading.Thread):
                 self.last_known_mtimes[dataset_path] = mtime
                 return
 
-        # Check uploads directory (UPLOADS_PATH now properly defined)
+        # Check uploads directory (UPLOADS_PATH defined globally)
         if UPLOADS_PATH.exists():
             for file_path in UPLOADS_PATH.glob("*"):
                 if file_path.is_file():

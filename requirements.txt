@@ -18,3 +18,13 @@ openpyxl>=3.1.2       # for Excel export
 xlsxwriter>=3.1.2     # for Excel export
 zai-sdk>=0.2.0        # for Zhipu video
 google-genai>=1.0.0    # for Gemini
+# Web scraping
+beautifulsoup4>=4.12.0
+lxml>=4.9.0
+playwright>=1.40.0
+crawlfish>=0.0.1
+crawl4ai>=0.3.0  # Optional: AI-powered extraction
+
+# Anti-block
+fake-useragent>=1.4.0
+requests[socks]>=2.31.0  # For proxy support

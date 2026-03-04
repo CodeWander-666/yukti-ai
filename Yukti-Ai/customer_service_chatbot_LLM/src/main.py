@@ -50,7 +50,7 @@ except ImportError:
     ZHIPU_API_KEY = os.getenv("ZHIPU_API_KEY", "")
     GOOGLE_API_KEY = os.getenv("GOOGLE_API_KEY", "")
 
-# Define UPLOADS_PATH (must be before any thread uses it)
+# Define UPLOADS_PATH globally
 UPLOADS_PATH = BASE_DIR / "data" / "uploads"
 UPLOADS_PATH.mkdir(parents=True, exist_ok=True)
 
@@ -115,7 +115,7 @@ try:
 except ImportError:
     KB_UPDATER_AVAILABLE = False
     def rebuild_index(): return False
-    KB_SOURCES = {"rss": [], "api": []}   # fallback to prevent NameError
+    KB_SOURCES = {"rss": [], "api": []}  # fallback to prevent NameError
 
 # Configure logging
 logging.basicConfig(level=logging.INFO, format='%(asctime)s - %(name)s - %(levelname)s - %(message)s')
@@ -604,7 +604,7 @@ def get_database_stats():
 # ----------------------------------------------------------------------
 def load_web_sources():
     """Load web scraping sources from JSON file (if exists)."""
-    config_file = Path(__file__).parent.parent / "knowledge_updater" / "web_sources.json"
+    config_file = Path(__file__).parent / "knowledge_updater" / "web_sources.json"
     if config_file.exists():
         try:
             with open(config_file, 'r') as f:
@@ -615,7 +615,7 @@ def load_web_sources():
 
 def save_web_sources(sources):
     """Save web scraping sources to JSON file."""
-    config_file = Path(__file__).parent.parent / "knowledge_updater" / "web_sources.json"
+    config_file = Path(__file__).parent / "knowledge_updater" / "web_sources.json"
     try:
         config_file.parent.mkdir(parents=True, exist_ok=True)
         with open(config_file, 'w') as f:
@@ -627,7 +627,7 @@ def save_web_sources(sources):
         return False
 
 # ----------------------------------------------------------------------
-# Background knowledge base updater thread (FIXED)
+# Background knowledge base updater thread
 # ----------------------------------------------------------------------
 class KnowledgeBaseUpdater(threading.Thread):
     """Background thread that checks for changes and rebuilds index if needed."""
@@ -649,7 +649,7 @@ class KnowledgeBaseUpdater(threading.Thread):
 
     def _check_and_rebuild(self):
         """Check if any source file has changed; if so, rebuild."""
-        # Check dataset.csv (correct path: PROJECT_ROOT/dataset/dataset.csv)
+        # Check dataset.csv
         dataset_path = PROJECT_ROOT / "dataset" / "dataset.csv"
         if dataset_path.exists():
             mtime = dataset_path.stat().st_mtime
@@ -659,7 +659,7 @@ class KnowledgeBaseUpdater(threading.Thread):
                 self.last_known_mtimes[dataset_path] = mtime
                 return
 
-        # Check uploads directory (UPLOADS_PATH defined globally)
+        # Check uploads directory
         if UPLOADS_PATH.exists():
             for file_path in UPLOADS_PATH.glob("*"):
                 if file_path.is_file():
@@ -1064,7 +1064,7 @@ if st.session_state.admin_mode:
 
         st.markdown("### ⚙️ Auto‑Update Status")
         st.success("✅ Auto‑update is running in background (checks every 2 seconds, rebuilds if changes detected).")
-        # Manual rebuild button is removed – only auto-update.
+        # Manual rebuild button removed
 
         with st.expander("📤 Upload Files", expanded=False):
             st.markdown("Upload CSV, TXT, or PDF files to add to the knowledge base. Changes will be picked up automatically.")

@@ -1,8 +1,10 @@
 """
 Main Streamlit application for Yukti AI.
 Includes hardcoded admin credentials (admin1234/admin1234) and a full admin dashboard.
-All tabs now display real-time data with comprehensive metrics and insights.
-Knowledge base updates automatically via background thread when changes are detected.
+Knowledge base updates automatically in the background (manual update button removed).
+All tabs display real-time data with comprehensive metrics and insights.
+Video tasks are isolated per user.
+Web scraping sources can be configured in the admin panel.
 """
 
 import os
@@ -108,6 +110,8 @@ try:
 except ImportError:
     KB_UPDATER_AVAILABLE = False
     def rebuild_index(): return False
+    # Fallback definition to prevent NameError in updater thread
+    UPLOADS_PATH = BASE_DIR / "data" / "uploads"
 
 # Configure logging
 logging.basicConfig(level=logging.INFO, format='%(asctime)s - %(name)s - %(levelname)s - %(message)s')
@@ -238,7 +242,7 @@ def ensure_admin_user():
 ensure_admin_user()
 
 # ----------------------------------------------------------------------
-# Authentication helpers (unchanged)
+# Authentication helpers
 # ----------------------------------------------------------------------
 def authenticate(username: str, password: str) -> Tuple[bool, Optional[int], bool]:
     try:
@@ -251,7 +255,7 @@ def authenticate(username: str, password: str) -> Tuple[bool, Optional[int], boo
             return True, row[0], bool(row[2])
         return False, None, False
     except Exception as e:
-        logger.exception(f"Authentication error")
+        logger.exception("Authentication error")
         return False, None, False
 
 def register_user(username: str, password: str) -> Tuple[bool, str]:
@@ -349,7 +353,7 @@ def record_kb_metrics():
         logger.error(f"Failed to record KB metrics: {e}")
 
 # ----------------------------------------------------------------------
-# Enhanced admin data functions
+# Enhanced admin data functions (with error handling and media columns)
 # ----------------------------------------------------------------------
 def get_all_users():
     try:
@@ -592,7 +596,35 @@ def get_database_stats():
     return stats
 
 # ----------------------------------------------------------------------
-# Background knowledge base updater thread
+# Web scraping configuration management
+# ----------------------------------------------------------------------
+def load_web_sources():
+    """Load web scraping sources from JSON file (if exists)."""
+    config_file = PROJECT_ROOT / "knowledge_updater" / "web_sources.json"
+    if config_file.exists():
+        try:
+            with open(config_file, 'r') as f:
+                return json.load(f)
+        except Exception as e:
+            logger.error(f"Failed to load web sources: {e}")
+    # Default structure
+    return {"websites": []}
+
+def save_web_sources(sources):
+    """Save web scraping sources to JSON file."""
+    config_file = PROJECT_ROOT / "knowledge_updater" / "web_sources.json"
+    try:
+        config_file.parent.mkdir(parents=True, exist_ok=True)
+        with open(config_file, 'w') as f:
+            json.dump(sources, f, indent=2)
+        logger.info("Web sources saved to web_sources.json")
+        return True
+    except Exception as e:
+        logger.error(f"Failed to save web sources: {e}")
+        return False
+
+# ----------------------------------------------------------------------
+# Background knowledge base updater thread (FIXED)
 # ----------------------------------------------------------------------
 class KnowledgeBaseUpdater(threading.Thread):
     """Background thread that checks for changes and rebuilds index if needed."""
@@ -614,7 +646,7 @@ class KnowledgeBaseUpdater(threading.Thread):
 
     def _check_and_rebuild(self):
         """Check if any source file has changed; if so, rebuild."""
-        # Check dataset.csv
+        # Check dataset.csv (correct path)
         dataset_path = PROJECT_ROOT / "dataset" / "dataset.csv"
         if dataset_path.exists():
             mtime = dataset_path.stat().st_mtime
@@ -624,7 +656,7 @@ class KnowledgeBaseUpdater(threading.Thread):
                 self.last_known_mtimes[dataset_path] = mtime
                 return
 
-        # Check uploads directory
+        # Check uploads directory (UPLOADS_PATH now properly defined)
         if UPLOADS_PATH.exists():
             for file_path in UPLOADS_PATH.glob("*"):
                 if file_path.is_file():
@@ -634,8 +666,6 @@ class KnowledgeBaseUpdater(threading.Thread):
                         self._trigger_rebuild()
                         self.last_known_mtimes[file_path] = mtime
                         return
-
-        # Optionally check RSS/API sources (we can't easily detect changes, so skip)
 
     def _trigger_rebuild(self):
         """Rebuild index if at least 60 seconds passed since last rebuild."""
@@ -682,6 +712,8 @@ if "logged_in" not in st.session_state:
     st.session_state.last_metrics_record = 0
     st.session_state.debug_mode = False
     st.session_state.auto_refresh = False
+    # Load web sources
+    st.session_state.web_sources = load_web_sources()
 
 # ----------------------------------------------------------------------
 # Login / Signup UI
@@ -780,14 +812,7 @@ with st.sidebar:
         st.markdown("❌ **Not Ready**")
         if kb_status["error"]:
             st.caption(f"Error: {kb_status['error']}")
-    if st.button("🔄 Update KB (Manual)", use_container_width=True):
-        with st.spinner("Rebuilding..."):
-            if rebuild_index():
-                st.session_state.kb_status = get_kb_detailed_status()
-                st.success("Knowledge base updated")
-                st.rerun()
-            else:
-                st.error("Update failed")
+    # Manual update button removed – auto-update only
     st.divider()
 
     if ZHIPU_AVAILABLE:
@@ -980,7 +1005,7 @@ if st.session_state.admin_mode:
         else:
             fig1 = px.line(perf, x="day", y="avg_response", color="model_key",
                            title="Average Response Time (ms) per Model")
-            st.plotly_chart(fig1, use_container_width=True)  # plotly uses use_container_width, not width
+            st.plotly_chart(fig1, use_container_width=True)
             perf['error_rate'] = perf['errors'] / perf['requests'] * 100
             fig2 = px.line(perf, x="day", y="error_rate", color="model_key",
                            title="Error Rate (%) per Model")
@@ -1013,7 +1038,7 @@ if st.session_state.admin_mode:
         fig6.update_layout(polar=dict(radialaxis=dict(visible=True, range=[0,100])))
         st.plotly_chart(fig6, use_container_width=True)
 
-    # ----- Knowledge Base Tab -----
+    # ----- Knowledge Base Tab (with Web Scraping) -----
     with tabs[3]:
         st.subheader("Knowledge Base Management")
         col1, col2 = st.columns(2)
@@ -1036,16 +1061,7 @@ if st.session_state.admin_mode:
 
         st.markdown("### ⚙️ Auto‑Update Status")
         st.success("✅ Auto‑update is running in background (checks every 2 seconds, rebuilds if changes detected).")
-        if st.button("🔄 Force Rebuild Now"):
-            with st.spinner("Rebuilding..."):
-                if rebuild_index():
-                    st.session_state.kb_status = get_kb_detailed_status()
-                    record_kb_metrics()
-                    log_admin_action(st.session_state.user_id, "REBUILD_KB", "Manual force")
-                    st.success("Rebuilt successfully!")
-                    st.rerun()
-                else:
-                    st.error("Rebuild failed – check logs.")
+        # Manual rebuild button is removed – only auto-update.
 
         with st.expander("📤 Upload Files", expanded=False):
             st.markdown("Upload CSV, TXT, or PDF files to add to the knowledge base. Changes will be picked up automatically.")
@@ -1063,9 +1079,8 @@ if st.session_state.admin_mode:
                     st.success(f"Saved {uploaded_file.name}")
                 st.info("Auto‑update will detect changes within 2 seconds and rebuild.")
 
-        with st.expander("🌐 Web Sources", expanded=False):
-            st.markdown("Configure RSS feeds and APIs (auto‑update not yet implemented for web sources).")
-            # Simplified configuration – for production, persist to JSON.
+        with st.expander("🌐 RSS & API", expanded=False):
+            st.markdown("Configure RSS feeds and APIs.")
             if "web_sources_config" not in st.session_state:
                 st.session_state.web_sources_config = KB_SOURCES.copy()
             config = st.session_state.web_sources_config
@@ -1099,9 +1114,50 @@ if st.session_state.admin_mode:
             if st.button("➕ Add API"):
                 config["api"].append({"name": "", "url": "", "enabled": True})
                 st.rerun()
-            if st.button("💾 Save Web Sources (to memory)"):
+            if st.button("💾 Save RSS/API Sources"):
                 st.success("Configuration saved (in memory). For persistence, implement JSON storage.")
                 st.rerun()
+
+        # ----- Website Crawling Section -----
+        with st.expander("🕷️ Website Crawling", expanded=False):
+            st.markdown("Configure websites to crawl entirely. The system will discover and index all pages from these sites.")
+            st.caption("Enable/disable each source with the checkbox. Click 'Save Web Sources' to persist changes.")
+
+            web_sources = st.session_state.web_sources
+            websites = web_sources.get("websites", [])
+
+            for i, site in enumerate(websites):
+                cols = st.columns([2, 3, 1, 1, 1])
+                with cols[0]:
+                    site["name"] = st.text_input("Name", value=site.get("name", ""), key=f"ws_name_{i}")
+                with cols[1]:
+                    site["url"] = st.text_input("URL", value=site.get("url", ""), key=f"ws_url_{i}")
+                with cols[2]:
+                    site["max_pages"] = st.number_input("Max Pages", value=site.get("max_pages", 50),
+                                                         min_value=1, max_value=1000, key=f"ws_pages_{i}")
+                with cols[3]:
+                    site["use_javascript"] = st.checkbox("JS Required", value=site.get("use_javascript", False),
+                                                          key=f"ws_js_{i}")
+                with cols[4]:
+                    site["enabled"] = st.checkbox("Enable", value=site.get("enabled", False), key=f"ws_enable_{i}")
+
+            if st.button("➕ Add Website"):
+                websites.append({
+                    "name": "",
+                    "url": "",
+                    "max_pages": 50,
+                    "use_javascript": False,
+                    "enabled": False
+                })
+                st.rerun()
+
+            if st.button("💾 Save Web Sources"):
+                web_sources["websites"] = websites
+                if save_web_sources(web_sources):
+                    st.session_state.web_sources = web_sources
+                    st.success("Web sources saved! They will be used in the next knowledge base rebuild.")
+                else:
+                    st.error("Failed to save web sources. Check logs.")
 
     # ----- Tasks Tab -----
     with tabs[4]:
@@ -1269,7 +1325,7 @@ else:
 
                 if model_key in ["Yukti‑Flash", "Yukti‑Quantum"]:
                     if not check_kb_status():
-                        ans = "KB not ready. Update first."
+                        ans = "KB not ready. Please wait for auto‑update to complete."
                         placeholder.markdown(ans)
                         result = {"type": "sync", "answer": ans}
                     else:
@@ -1306,6 +1362,14 @@ else:
                         with st.expander("Reasoning"):
                             st.markdown(result["monologue"])
                     placeholder.markdown(ans)
+
+                    # ---- Display sources (if any) ----
+                    if result.get("sources"):
+                        with st.expander("📚 Sources"):
+                            for i, doc in enumerate(result["sources"]):
+                                source_url = doc.metadata.get("source", "Unknown source")
+                                st.markdown(f"{i+1}. [{source_url}]({source_url})")
+
                     log_user_activity(st.session_state.user_id, model_key, len(prompt),
                                       int((time.time()-start)*1000), True)
                     st.session_state.messages.append({"role": "assistant", "content": ans, "media": result.get("media", [])})

@@ -1,14 +1,16 @@
 """
 Configuration for knowledge updater – defines paths and data sources.
+Sources are loaded from JSON files to allow dynamic updates.
 """
+
 import os
-import sys
+import json
+import logging
 from pathlib import Path
 
-# Add project root to path to allow imports from src
-BASE_DIR = Path(__file__).parent.parent.parent.absolute()
-if str(BASE_DIR) not in sys.path:
-    sys.path.insert(0, str(BASE_DIR))
+logger = logging.getLogger(__name__)
+
+BASE_DIR = Path(__file__).parent.parent.absolute()
 
 # Paths
 DATASET_PATH = BASE_DIR / "dataset" / "dataset.csv"
@@ -18,15 +20,35 @@ VECTORDB_PATH = Path(os.getenv("FAISS_PATH", BASE_DIR / "faiss_index"))
 # Ensure uploads directory exists
 UPLOADS_PATH.mkdir(parents=True, exist_ok=True)
 
-# Web sources – can be extended via admin UI
+# JSON files for user‑defined sources
+SOURCES_FILE = BASE_DIR / "knowledge_updater" / "sources.json"
+WEBSITES_FILE = BASE_DIR / "knowledge_updater" / "web_sources.json"
+
+# Default sources
 SOURCES = {
-    "rss": [
-        {"name": "Example RSS", "url": "https://example.com/rss", "enabled": True},
-    ],
-    "api": [
-        {"name": "Example API", "url": "https://api.example.com/posts", "enabled": False},
-    ],
-    # Websites are loaded from web_sources.json (created by admin)
+    "rss": [],
+    "api": [],
+    "websites": []
 }
 
+# Load user sources if they exist
+if SOURCES_FILE.exists():
+    try:
+        with open(SOURCES_FILE, 'r') as f:
+            user_sources = json.load(f)
+            SOURCES.update(user_sources)
+        logger.info(f"Loaded user sources from {SOURCES_FILE}")
+    except Exception as e:
+        logger.error(f"Failed to load {SOURCES_FILE}: {e}")
+
+# Load websites (crawling targets) if they exist
+if WEBSITES_FILE.exists():
+    try:
+        with open(WEBSITES_FILE, 'r') as f:
+            SOURCES["websites"] = json.load(f).get("websites", [])
+        logger.info(f"Loaded websites from {WEBSITES_FILE}")
+    except Exception as e:
+        logger.error(f"Failed to load {WEBSITES_FILE}: {e}")
+
+# Update interval for scheduler (not used in auto‑updater)
 UPDATE_INTERVAL = 3600  # 1 hour

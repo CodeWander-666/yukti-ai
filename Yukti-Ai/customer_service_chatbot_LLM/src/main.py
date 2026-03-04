@@ -2,9 +2,7 @@
 Main Streamlit application for Yukti AI.
 Includes hardcoded admin credentials (admin1234/admin1234) and a full admin dashboard.
 Knowledge base updates automatically in the background (manual update button removed).
-All tabs display real-time data with comprehensive metrics and insights.
-Video tasks are isolated per user.
-Web scraping sources can be configured in the admin panel.
+Now supports on‑demand web scraping for user queries.
 """
 
 import os
@@ -53,6 +51,10 @@ except ImportError:
 # Define UPLOADS_PATH globally
 UPLOADS_PATH = BASE_DIR / "data" / "uploads"
 UPLOADS_PATH.mkdir(parents=True, exist_ok=True)
+
+# Paths for source JSON files
+SOURCES_FILE = BASE_DIR / "knowledge_updater" / "sources.json"
+WEBSITES_FILE = BASE_DIR / "knowledge_updater" / "web_sources.json"
 
 try:
     from langchain_helper import (
@@ -110,12 +112,12 @@ except ImportError:
 # Import knowledge updater components
 try:
     from knowledge_updater.builder import rebuild_index
-    from knowledge_updater.config import SOURCES as KB_SOURCES
+    from knowledge_updater.connectors import scrape_url
     KB_UPDATER_AVAILABLE = True
 except ImportError:
     KB_UPDATER_AVAILABLE = False
     def rebuild_index(): return False
-    KB_SOURCES = {"rss": [], "api": []}  # fallback to prevent NameError
+    def scrape_url(url, use_js=False): return None
 
 # Configure logging
 logging.basicConfig(level=logging.INFO, format='%(asctime)s - %(name)s - %(levelname)s - %(message)s')
@@ -246,7 +248,7 @@ def ensure_admin_user():
 ensure_admin_user()
 
 # ----------------------------------------------------------------------
-# Authentication helpers
+# Authentication helpers (unchanged)
 # ----------------------------------------------------------------------
 def authenticate(username: str, password: str) -> Tuple[bool, Optional[int], bool]:
     try:
@@ -307,7 +309,7 @@ def log_admin_action(admin_id: int, action: str, details: str = ""):
         logger.error(f"Failed to log admin action: {e}")
 
 # ----------------------------------------------------------------------
-# System metrics
+# System metrics (unchanged)
 # ----------------------------------------------------------------------
 try:
     import psutil
@@ -357,7 +359,7 @@ def record_kb_metrics():
         logger.error(f"Failed to record KB metrics: {e}")
 
 # ----------------------------------------------------------------------
-# Enhanced admin data functions (with error handling and media columns)
+# Enhanced admin data functions (unchanged, but ensure use_container_width replaced)
 # ----------------------------------------------------------------------
 def get_all_users():
     try:
@@ -600,25 +602,23 @@ def get_database_stats():
     return stats
 
 # ----------------------------------------------------------------------
-# Web scraping configuration management
+# Web scraping configuration management (updated to use files)
 # ----------------------------------------------------------------------
 def load_web_sources():
-    """Load web scraping sources from JSON file (if exists)."""
-    config_file = Path(__file__).parent / "knowledge_updater" / "web_sources.json"
-    if config_file.exists():
+    """Load web scraping sources from web_sources.json."""
+    if WEBSITES_FILE.exists():
         try:
-            with open(config_file, 'r') as f:
+            with open(WEBSITES_FILE, 'r') as f:
                 return json.load(f)
         except Exception as e:
             logger.error(f"Failed to load web sources: {e}")
     return {"websites": []}
 
 def save_web_sources(sources):
-    """Save web scraping sources to JSON file."""
-    config_file = Path(__file__).parent / "knowledge_updater" / "web_sources.json"
+    """Save web scraping sources to web_sources.json."""
     try:
-        config_file.parent.mkdir(parents=True, exist_ok=True)
-        with open(config_file, 'w') as f:
+        WEBSITES_FILE.parent.mkdir(parents=True, exist_ok=True)
+        with open(WEBSITES_FILE, 'w') as f:
             json.dump(sources, f, indent=2)
         logger.info("Web sources saved to web_sources.json")
         return True
@@ -626,8 +626,30 @@ def save_web_sources(sources):
         logger.error(f"Failed to save web sources: {e}")
         return False
 
+def load_rss_api_sources():
+    """Load RSS/API sources from sources.json."""
+    if SOURCES_FILE.exists():
+        try:
+            with open(SOURCES_FILE, 'r') as f:
+                return json.load(f)
+        except Exception as e:
+            logger.error(f"Failed to load sources.json: {e}")
+    return {"rss": [], "api": []}
+
+def save_rss_api_sources(sources):
+    """Save RSS/API sources to sources.json."""
+    try:
+        SOURCES_FILE.parent.mkdir(parents=True, exist_ok=True)
+        with open(SOURCES_FILE, 'w') as f:
+            json.dump(sources, f, indent=2)
+        logger.info("RSS/API sources saved to sources.json")
+        return True
+    except Exception as e:
+        logger.error(f"Failed to save sources: {e}")
+        return False
+
 # ----------------------------------------------------------------------
-# Background knowledge base updater thread
+# Background knowledge base updater thread (FIXED)
 # ----------------------------------------------------------------------
 class KnowledgeBaseUpdater(threading.Thread):
     """Background thread that checks for changes and rebuilds index if needed."""
@@ -670,6 +692,16 @@ class KnowledgeBaseUpdater(threading.Thread):
                         self.last_known_mtimes[file_path] = mtime
                         return
 
+        # Also check sources.json and web_sources.json for changes
+        for config_file in [SOURCES_FILE, WEBSITES_FILE]:
+            if config_file.exists():
+                mtime = config_file.stat().st_mtime
+                if config_file not in self.last_known_mtimes or self.last_known_mtimes[config_file] != mtime:
+                    logger.info(f"Change detected in {config_file}. Scheduling rebuild.")
+                    self._trigger_rebuild()
+                    self.last_known_mtimes[config_file] = mtime
+                    return
+
     def _trigger_rebuild(self):
         """Rebuild index if at least 60 seconds passed since last rebuild."""
         now = time.time()
@@ -677,8 +709,9 @@ class KnowledgeBaseUpdater(threading.Thread):
             logger.info("Skipping rebuild – last rebuild too recent.")
             return
         logger.info("Auto-rebuilding knowledge base...")
-        if rebuild_index():
-            self.last_rebuild_time = now
+        success = rebuild_index()
+        self.last_rebuild_time = now  # always update to prevent rapid retries
+        if success:
             # Update session state status
             if 'kb_status' in st.session_state:
                 st.session_state.kb_status = get_kb_detailed_status()
@@ -717,9 +750,11 @@ if "logged_in" not in st.session_state:
     st.session_state.auto_refresh = False
     # Load web sources
     st.session_state.web_sources = load_web_sources()
+    # Load RSS/API sources
+    st.session_state.rss_api_sources = load_rss_api_sources()
 
 # ----------------------------------------------------------------------
-# Login / Signup UI
+# Login / Signup UI (unchanged)
 # ----------------------------------------------------------------------
 if not st.session_state.logged_in:
     st.title("Yukti AI")
@@ -892,7 +927,7 @@ if st.session_state.admin_mode:
         cols[1].metric("Memory", f"{sys_metrics['memory']:.1f}%")
         cols[2].metric("Disk", f"{sys_metrics['disk']:.1f}%")
 
-    # ----- Users Tab -----
+    # ----- Users Tab (unchanged, but replace use_container_width with width='stretch') -----
     with tabs[1]:
         st.subheader("User Management")
 
@@ -949,11 +984,11 @@ if st.session_state.admin_mode:
                 'audio_created': 'Audio'
             }
             display_df = display_df.rename(columns={k: v for k, v in rename_map.items() if k in display_df.columns})
-            st.dataframe(display_df, width='stretch')
+            st.dataframe(display_df, width='stretch')  # replaced
 
             if st.session_state.debug_mode:
                 with st.expander("🔍 Raw User Data (Debug)"):
-                    st.dataframe(users_df, width='stretch')
+                    st.dataframe(users_df, width='stretch')  # replaced
 
             st.markdown("### ✏️ Edit / Delete Users")
             for _, row in users_df.iterrows():
@@ -984,7 +1019,7 @@ if st.session_state.admin_mode:
                             else:
                                 st.error(msg)
 
-    # ----- Analytics Tab -----
+    # ----- Analytics Tab (unchanged) -----
     with tabs[2]:
         st.subheader("Essential Performance Metrics")
         conn = sqlite3.connect(str(DB_PATH))
@@ -1064,7 +1099,6 @@ if st.session_state.admin_mode:
 
         st.markdown("### ⚙️ Auto‑Update Status")
         st.success("✅ Auto‑update is running in background (checks every 2 seconds, rebuilds if changes detected).")
-        # Manual rebuild button removed
 
         with st.expander("📤 Upload Files", expanded=False):
             st.markdown("Upload CSV, TXT, or PDF files to add to the knowledge base. Changes will be picked up automatically.")
@@ -1084,15 +1118,17 @@ if st.session_state.admin_mode:
 
         with st.expander("🌐 RSS & API", expanded=False):
             st.markdown("Configure RSS feeds and APIs.")
-            if "web_sources_config" not in st.session_state:
-                st.session_state.web_sources_config = KB_SOURCES.copy()
-            config = st.session_state.web_sources_config
+            # Use session state as working copy
+            if "rss_api_sources" not in st.session_state:
+                st.session_state.rss_api_sources = load_rss_api_sources()
+            config = st.session_state.rss_api_sources
+
             st.subheader("RSS Feeds")
             for i, feed in enumerate(config.get("rss", [])):
                 cols = st.columns([3, 1, 1])
                 with cols[0]:
-                    feed["name"] = st.text_input(f"Name", value=feed["name"], key=f"rss_name_{i}")
-                    feed["url"] = st.text_input(f"URL", value=feed["url"], key=f"rss_url_{i}")
+                    feed["name"] = st.text_input(f"Name", value=feed.get("name", ""), key=f"rss_name_{i}")
+                    feed["url"] = st.text_input(f"URL", value=feed.get("url", ""), key=f"rss_url_{i}")
                 with cols[1]:
                     feed["enabled"] = st.checkbox("Enabled", value=feed.get("enabled", True), key=f"rss_enabled_{i}")
                 with cols[2]:
@@ -1102,12 +1138,13 @@ if st.session_state.admin_mode:
             if st.button("➕ Add RSS Feed"):
                 config["rss"].append({"name": "", "url": "", "enabled": True})
                 st.rerun()
+
             st.subheader("APIs")
             for i, api in enumerate(config.get("api", [])):
                 cols = st.columns([3, 1, 1])
                 with cols[0]:
-                    api["name"] = st.text_input(f"Name", value=api["name"], key=f"api_name_{i}")
-                    api["url"] = st.text_input(f"URL", value=api["url"], key=f"api_url_{i}")
+                    api["name"] = st.text_input(f"Name", value=api.get("name", ""), key=f"api_name_{i}")
+                    api["url"] = st.text_input(f"URL", value=api.get("url", ""), key=f"api_url_{i}")
                 with cols[1]:
                     api["enabled"] = st.checkbox("Enabled", value=api.get("enabled", True), key=f"api_enabled_{i}")
                 with cols[2]:
@@ -1117,11 +1154,13 @@ if st.session_state.admin_mode:
             if st.button("➕ Add API"):
                 config["api"].append({"name": "", "url": "", "enabled": True})
                 st.rerun()
-            if st.button("💾 Save RSS/API Sources"):
-                st.success("Configuration saved (in memory). For persistence, implement JSON storage.")
-                st.rerun()
 
-        # ----- Website Crawling Section -----
+            if st.button("💾 Save RSS/API Sources"):
+                if save_rss_api_sources(config):
+                    st.success("Sources saved! They will be used in the next knowledge base rebuild.")
+                else:
+                    st.error("Failed to save sources. Check logs.")
+
         with st.expander("🕷️ Website Crawling", expanded=False):
             st.markdown("Configure websites to crawl entirely. The system will discover and index all pages from these sites.")
             st.caption("Enable/disable each source with the checkbox. Click 'Save Web Sources' to persist changes.")
@@ -1162,7 +1201,7 @@ if st.session_state.admin_mode:
                 else:
                     st.error("Failed to save web sources. Check logs.")
 
-    # ----- Tasks Tab -----
+    # ----- Tasks Tab (unchanged) -----
     with tabs[4]:
         st.subheader("Active Tasks")
         active = get_active_tasks(st.session_state.user_id)
@@ -1183,9 +1222,9 @@ if st.session_state.admin_mode:
         if hist.empty:
             st.info("📋 No task history yet.")
         else:
-            st.dataframe(hist, width='stretch')
+            st.dataframe(hist, width='stretch')  # replaced
 
-    # ----- Insights Tab -----
+    # ----- Insights Tab (unchanged) -----
     with tabs[5]:
         st.subheader("AI‑Powered Insights")
         conn = sqlite3.connect(str(DB_PATH))
@@ -1261,7 +1300,7 @@ if st.session_state.admin_mode:
         else:
             st.info("Insufficient data for forecast.")
 
-    # ----- System Tab -----
+    # ----- System Tab (unchanged) -----
     with tabs[6]:
         st.subheader("System Control")
         if st.button("📥 Export Analytics"):
@@ -1285,7 +1324,7 @@ if st.session_state.admin_mode:
     st.stop()
 
 else:
-    # -------------------- Chat Interface --------------------
+    # -------------------- Chat Interface (enhanced with dynamic web scraping) --------------------
     for msg in st.session_state.messages:
         with st.chat_message(msg["role"]):
             st.markdown(msg["content"])
@@ -1297,6 +1336,10 @@ else:
                         st.audio(m["url"])
                     elif m["type"] == "video":
                         st.video(m["url"])
+            if "sources" in msg:
+                with st.expander("📚 Sources"):
+                    for source in msg["sources"]:
+                        st.markdown(f"- [{source}]({source})")
 
     if prompt := st.chat_input("Type your message..."):
         start = time.time()
@@ -1326,7 +1369,25 @@ else:
                 if uploaded:
                     extra["image_url"] = uploaded
 
-                if model_key in ["Yukti‑Flash", "Yukti‑Quantum"]:
+                # Check if the user wants to scrape a website (simple heuristic: contains "scrape" or a URL)
+                # In a more advanced implementation, you could use the LLM to decide.
+                import re
+                url_match = re.search(r'(https?://[^\s]+)', prompt)
+                if url_match and ("scrape" in prompt.lower() or "get content" in prompt.lower()):
+                    url = url_match.group(0)
+                    use_js = "javascript" in prompt.lower() or "dynamic" in prompt.lower()
+                    with st.spinner(f"Scraping {url}..."):
+                        scraped_text = scrape_url(url, use_js)
+                    if scraped_text:
+                        # Truncate if too long
+                        if len(scraped_text) > 2000:
+                            scraped_text = scraped_text[:2000] + "... (truncated)"
+                        answer = f"Here's the content I scraped from {url}:\n\n{scraped_text}"
+                        result = {"type": "sync", "answer": answer, "sources": [url]}
+                    else:
+                        answer = f"Failed to scrape {url}. The site may be blocking automated requests or requires JavaScript."
+                        result = {"type": "sync", "answer": answer}
+                elif model_key in ["Yukti‑Flash", "Yukti‑Quantum"]:
                     if not check_kb_status():
                         ans = "KB not ready. Please wait for auto‑update to complete."
                         placeholder.markdown(ans)
@@ -1366,16 +1427,25 @@ else:
                             st.markdown(result["monologue"])
                     placeholder.markdown(ans)
 
-                    # ---- Display sources (if any) ----
+                    # Display sources if any
                     if result.get("sources"):
                         with st.expander("📚 Sources"):
-                            for i, doc in enumerate(result["sources"]):
-                                source_url = doc.metadata.get("source", "Unknown source")
-                                st.markdown(f"{i+1}. [{source_url}]({source_url})")
+                            for source in result["sources"]:
+                                # source may be a Document object or a string
+                                if hasattr(source, 'metadata') and source.metadata.get('source'):
+                                    url = source.metadata['source']
+                                    st.markdown(f"- [{url}]({url})")
+                                elif isinstance(source, str):
+                                    st.markdown(f"- [{source}]({source})")
 
                     log_user_activity(st.session_state.user_id, model_key, len(prompt),
                                       int((time.time()-start)*1000), True)
-                    st.session_state.messages.append({"role": "assistant", "content": ans, "media": result.get("media", [])})
+                    st.session_state.messages.append({
+                        "role": "assistant",
+                        "content": ans,
+                        "media": result.get("media", []),
+                        "sources": result.get("sources", [])
+                    })
                 elif result.get("type") == "async":
                     st.info(f"Task {result['task_id']} submitted. Check sidebar.")
                     st.session_state.messages.append({"role": "assistant", "content": ans})

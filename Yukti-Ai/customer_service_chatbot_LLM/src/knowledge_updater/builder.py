@@ -1,6 +1,8 @@
 """
 Core builder for FAISS index – fetches sources, deduplicates, and atomically replaces index.
+Includes robust backup handling.
 """
+
 import logging
 import shutil
 import sys
@@ -15,7 +17,7 @@ from .connectors import fetch_all_sources
 from .config import VECTORDB_PATH
 
 # Add project root to path to import src.embeddings
-BASE_DIR = Path(__file__).parent.parent.parent.absolute()
+BASE_DIR = Path(__file__).parent.parent.absolute()
 if str(BASE_DIR) not in sys.path:
     sys.path.insert(0, str(BASE_DIR))
 
@@ -38,7 +40,7 @@ def deduplicate_documents(docs: List[Document]) -> List[Document]:
 def rebuild_index() -> bool:
     """
     Fetch all documents, build a new FAISS index in a temporary directory,
-    then atomically replace the old index.
+    then atomically replace the old index. Removes any existing backup first.
     """
     logger.info("Starting knowledge base rebuild...")
 
@@ -68,6 +70,10 @@ def rebuild_index() -> bool:
         # Atomically replace the old index
         if VECTORDB_PATH.exists():
             backup = VECTORDB_PATH.with_suffix(".bak")
+            # Remove any existing backup
+            if backup.exists():
+                shutil.rmtree(backup)
+                logger.info(f"Removed old backup {backup}")
             shutil.move(str(VECTORDB_PATH), str(backup))
             logger.info(f"Backed up old index to {backup}")
 

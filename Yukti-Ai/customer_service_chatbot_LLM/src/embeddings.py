@@ -6,7 +6,8 @@ Used by both the main app and the knowledge updater.
 import logging
 from functools import lru_cache
 
-from langchain_community.embeddings import HuggingFaceEmbeddings
+# Use the new, recommended package
+from langchain_huggingface import HuggingFaceEmbeddings
 
 logger = logging.getLogger(__name__)
 

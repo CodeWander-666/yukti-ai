@@ -670,12 +670,25 @@ class KnowledgeBaseUpdater(threading.Thread):
             time.sleep(self.check_interval)
 
     def _check_and_rebuild(self):
-        """Check if any source file has changed; if so, rebuild."""
+        """Check if any source file has changed and is newer than the current index."""
+        # Get index modification time (if exists)
+        index_mtime = None
+        if VECTORDB_PATH.exists():
+            index_mtime = VECTORDB_PATH.stat().st_mtime
+
+        # Helper to check if a file should trigger rebuild
+        def should_rebuild(file_path: Path, current_mtime: float) -> bool:
+            # If no index, always rebuild
+            if index_mtime is None:
+                return True
+            # If file is newer than index, rebuild
+            return current_mtime > index_mtime
+
         # Check dataset.csv
-        dataset_path = PROJECT_ROOT / "dataset" / "dataset.csv"
+        dataset_path = BASE_DIR / "dataset" / "dataset.csv"
         if dataset_path.exists():
             mtime = dataset_path.stat().st_mtime
-            if dataset_path not in self.last_known_mtimes or self.last_known_mtimes[dataset_path] != mtime:
+            if should_rebuild(dataset_path, mtime):
                 logger.info(f"Change detected in {dataset_path}. Scheduling rebuild.")
                 self._trigger_rebuild()
                 self.last_known_mtimes[dataset_path] = mtime
@@ -686,7 +699,7 @@ class KnowledgeBaseUpdater(threading.Thread):
             for file_path in UPLOADS_PATH.glob("*"):
                 if file_path.is_file():
                     mtime = file_path.stat().st_mtime
-                    if file_path not in self.last_known_mtimes or self.last_known_mtimes[file_path] != mtime:
+                    if should_rebuild(file_path, mtime):
                         logger.info(f"Change detected in {file_path}. Scheduling rebuild.")
                         self._trigger_rebuild()
                         self.last_known_mtimes[file_path] = mtime
@@ -696,7 +709,7 @@ class KnowledgeBaseUpdater(threading.Thread):
         for config_file in [SOURCES_FILE, WEBSITES_FILE]:
             if config_file.exists():
                 mtime = config_file.stat().st_mtime
-                if config_file not in self.last_known_mtimes or self.last_known_mtimes[config_file] != mtime:
+                if should_rebuild(config_file, mtime):
                     logger.info(f"Change detected in {config_file}. Scheduling rebuild.")
                     self._trigger_rebuild()
                     self.last_known_mtimes[config_file] = mtime
@@ -1370,7 +1383,6 @@ else:
                     extra["image_url"] = uploaded
 
                 # Check if the user wants to scrape a website (simple heuristic: contains "scrape" or a URL)
-                # In a more advanced implementation, you could use the LLM to decide.
                 import re
                 url_match = re.search(r'(https?://[^\s]+)', prompt)
                 if url_match and ("scrape" in prompt.lower() or "get content" in prompt.lower()):

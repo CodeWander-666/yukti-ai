@@ -1,6 +1,6 @@
 """
 Core builder for FAISS index – fetches sources, deduplicates, and atomically replaces index.
-Includes robust backup handling.
+Includes robust backup handling and cross-device move fix.
 """
 
 import logging
@@ -40,7 +40,7 @@ def deduplicate_documents(docs: List[Document]) -> List[Document]:
 def rebuild_index() -> bool:
     """
     Fetch all documents, build a new FAISS index in a temporary directory,
-    then atomically replace the old index. Removes any existing backup first.
+    then atomically replace the old index. Handles cross-device moves by using copytree.
     """
     logger.info("Starting knowledge base rebuild...")
 
@@ -67,17 +67,28 @@ def rebuild_index() -> bool:
             logger.exception("FAISS build failed")
             return False
 
-        # Atomically replace the old index
+        # Atomically replace the old index (handle cross-device by using copytree)
         if VECTORDB_PATH.exists():
             backup = VECTORDB_PATH.with_suffix(".bak")
-            # Remove any existing backup
             if backup.exists():
                 shutil.rmtree(backup)
                 logger.info(f"Removed old backup {backup}")
-            shutil.move(str(VECTORDB_PATH), str(backup))
+            # Move current index to backup (using move, which may fail cross-device; fallback to copytree+rmtree)
+            try:
+                shutil.move(str(VECTORDB_PATH), str(backup))
+            except OSError as e:
+                # Cross-device move not possible; copy then delete
+                logger.warning(f"Move failed ({e}), using copy+remove")
+                if backup.exists():
+                    shutil.rmtree(backup)
+                shutil.copytree(str(VECTORDB_PATH), str(backup))
+                shutil.rmtree(str(VECTORDB_PATH))
             logger.info(f"Backed up old index to {backup}")
 
-        shutil.move(str(tmp_path), str(VECTORDB_PATH))
+        # Deploy new index (use copytree with dirs_exist_ok=True for cross-device)
+        if VECTORDB_PATH.exists():
+            shutil.rmtree(VECTORDB_PATH)
+        shutil.copytree(str(tmp_path), str(VECTORDB_PATH), dirs_exist_ok=True)
         logger.info(f"New index deployed to {VECTORDB_PATH}")
 
     return True

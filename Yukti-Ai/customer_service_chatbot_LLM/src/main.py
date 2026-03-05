@@ -56,6 +56,7 @@ UPLOADS_PATH.mkdir(parents=True, exist_ok=True)
 SOURCES_FILE = BASE_DIR / "knowledge_updater" / "sources.json"
 WEBSITES_FILE = BASE_DIR / "knowledge_updater" / "web_sources.json"
 
+# Ensure langchain_helper is imported correctly
 try:
     from langchain_helper import (
         create_vector_db,
@@ -63,9 +64,13 @@ try:
         get_document_count,
         check_kb_status,
     )
-except ImportError:
+    LANGCHAIN_HELPER_AVAILABLE = True
+except ImportError as e:
+    logging.error(f"Failed to import langchain_helper: {e}")
+    LANGCHAIN_HELPER_AVAILABLE = False
+    # Fallback functions
     def create_vector_db(): return False
-    def get_kb_detailed_status(): return {"ready": False, "error": "Not implemented"}
+    def get_kb_detailed_status(): return {"ready": False, "error": "Module not loaded"}
     def get_document_count(): return None
     def check_kb_status(): return False
 
@@ -134,6 +139,8 @@ st.set_page_config(page_title="Yukti AI", page_icon="🚀", layout="wide", initi
 def init_db():
     """Create all tables if they don't exist."""
     try:
+        # Ensure directory exists
+        DB_PATH.parent.mkdir(parents=True, exist_ok=True)
         conn = sqlite3.connect(str(DB_PATH))
         c = conn.cursor()
 
@@ -217,23 +224,28 @@ def init_db():
 
         conn.commit()
         conn.close()
-        logger.info("Database initialized successfully")
+        logger.info("Database initialized successfully at %s", DB_PATH)
+        return True
     except Exception as e:
         logger.exception("Database initialization failed")
         st.error(f"Database error: {e}")
-        st.stop()
+        return False
 
-init_db()
+# Run database init and verify tables exist
+if not init_db():
+    st.stop()
 
 # ----------------------------------------------------------------------
-# Ensure default admin user exists
+# Ensure default admin user exists (only if users table is empty)
 # ----------------------------------------------------------------------
 def ensure_admin_user():
     try:
         conn = sqlite3.connect(str(DB_PATH))
         c = conn.cursor()
-        c.execute("SELECT id FROM users WHERE username = 'admin1234'")
-        if not c.fetchone():
+        # Check if any user exists
+        c.execute("SELECT COUNT(*) FROM users")
+        count = c.fetchone()[0]
+        if count == 0:
             hashed = bcrypt.hashpw(b'admin1234', bcrypt.gensalt()).decode('utf-8')
             c.execute(
                 "INSERT INTO users (username, password_hash, is_admin) VALUES (?, ?, 1)",
@@ -241,6 +253,8 @@ def ensure_admin_user():
             )
             conn.commit()
             logger.info("Default admin user created (admin1234/admin1234)")
+        else:
+            logger.info("Users already exist, skipping admin creation.")
         conn.close()
     except Exception as e:
         logger.error(f"Failed to create default admin: {e}")
@@ -248,7 +262,7 @@ def ensure_admin_user():
 ensure_admin_user()
 
 # ----------------------------------------------------------------------
-# Authentication helpers (unchanged)
+# Authentication helpers
 # ----------------------------------------------------------------------
 def authenticate(username: str, password: str) -> Tuple[bool, Optional[int], bool]:
     try:
@@ -309,7 +323,7 @@ def log_admin_action(admin_id: int, action: str, details: str = ""):
         logger.error(f"Failed to log admin action: {e}")
 
 # ----------------------------------------------------------------------
-# System metrics (unchanged)
+# System metrics
 # ----------------------------------------------------------------------
 try:
     import psutil
@@ -372,7 +386,7 @@ def record_kb_metrics():
         logger.error(f"Failed to record KB metrics: {e}")
 
 # ----------------------------------------------------------------------
-# Enhanced admin data functions (unchanged, but replace use_container_width with width='stretch')
+# Enhanced admin data functions (with width='stretch')
 # ----------------------------------------------------------------------
 def get_all_users():
     try:
@@ -615,7 +629,7 @@ def get_database_stats():
     return stats
 
 # ----------------------------------------------------------------------
-# Web scraping configuration management (unchanged)
+# Web scraping configuration management
 # ----------------------------------------------------------------------
 def load_web_sources():
     """Load web scraping sources from web_sources.json."""
@@ -662,7 +676,7 @@ def save_rss_api_sources(sources):
         return False
 
 # ----------------------------------------------------------------------
-# Background knowledge base updater thread (unchanged, but uses improved record_kb_metrics)
+# Background knowledge base updater thread (with debounce)
 # ----------------------------------------------------------------------
 class KnowledgeBaseUpdater(threading.Thread):
     """Background thread that checks for changes and rebuilds index if needed."""
@@ -737,7 +751,7 @@ class KnowledgeBaseUpdater(threading.Thread):
         if success:
             if 'kb_status' in st.session_state:
                 st.session_state.kb_status = get_kb_detailed_status()
-            record_kb_metrics()   # now safe even if table missing
+            record_kb_metrics()
             logger.info("Auto-rebuild completed.")
         else:
             logger.error("Auto-rebuild failed.")
@@ -1004,7 +1018,7 @@ if st.session_state.admin_mode:
                 'audio_created': 'Audio'
             }
             display_df = display_df.rename(columns={k: v for k, v in rename_map.items() if k in display_df.columns})
-            st.dataframe(display_df, width='stretch')  # replaced use_container_width
+            st.dataframe(display_df, width='stretch')  # replaced
 
             if st.session_state.debug_mode:
                 with st.expander("🔍 Raw User Data (Debug)"):

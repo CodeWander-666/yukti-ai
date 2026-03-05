@@ -14,8 +14,10 @@ from langchain_community.vectorstores import FAISS
 from langchain_community.document_loaders import CSVLoader
 from langchain_core.documents import Document
 
+# Use the new HuggingFaceEmbeddings from langchain_huggingface
+from langchain_huggingface import HuggingFaceEmbeddings
+
 from config import DATASET_PATH, VECTORDB_PATH
-from embeddings import get_embeddings
 
 logger = logging.getLogger(__name__)
 
@@ -162,6 +164,33 @@ def get_kb_detailed_status() -> Dict[str, Any]:
     return result
 
 # ----------------------------------------------------------------------
+# Embedding loader (cached)
+# ----------------------------------------------------------------------
+from functools import lru_cache
+
+@lru_cache(maxsize=1)
+def get_embeddings():
+    """
+    Return a HuggingFace embedding model (all-MiniLM-L6-v2).
+    The result is cached using lru_cache to ensure only one instance is created.
+    This function can be called from both Streamlit and non‑Streamlit environments.
+    """
+    try:
+        logger.info("Loading embedding model: sentence-transformers/all-MiniLM-L6-v2")
+        embeddings = HuggingFaceEmbeddings(
+            model_name="sentence-transformers/all-MiniLM-L6-v2",
+            model_kwargs={'device': 'cpu'},
+            encode_kwargs={'normalize_embeddings': True}
+        )
+        # Quick test
+        _ = embeddings.embed_query("test")
+        logger.info("Embedding model loaded successfully.")
+        return embeddings
+    except Exception as e:
+        logger.exception("Failed to load embedding model")
+        raise RuntimeError(f"Embedding model unavailable: {e}") from e
+
+# ----------------------------------------------------------------------
 # Optional re‑ranking (if cross‑encoder available)
 # ----------------------------------------------------------------------
 try:
@@ -176,7 +205,6 @@ def get_cross_encoder() -> Optional[object]:
         logger.debug("sentence-transformers not fully installed; re‑ranking disabled.")
         return None
     try:
-        # Cache the model at module level (simple LRU)
         if not hasattr(get_cross_encoder, "_model"):
             logger.info("Loading cross‑encoder: cross-encoder/ms-marco-MiniLM-L-6-v2")
             get_cross_encoder._model = CrossEncoder("cross-encoder/ms-marco-MiniLM-L-6-v2")
@@ -213,7 +241,7 @@ def retrieve_and_rerank(
         return docs[:k]
 
 # ----------------------------------------------------------------------
-# Exports (explicit)
+# Exports
 # ----------------------------------------------------------------------
 __all__ = [
     "create_vector_db",
@@ -223,4 +251,5 @@ __all__ = [
     "get_document_count",
     "get_kb_detailed_status",
     "retrieve_and_rerank",
+    "get_embeddings",
 ]

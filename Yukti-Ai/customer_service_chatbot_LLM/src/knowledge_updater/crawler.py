@@ -1,6 +1,7 @@
 """
-Simple website crawler for indexing entire sites.
+Enhanced website crawler for indexing entire sites.
 Uses requests + BeautifulSoup for static sites, and optionally Playwright for JS.
+Includes anti‑block strategies: rotating user agents, smart delays, proxy support.
 """
 
 import time
@@ -13,6 +14,9 @@ import requests
 from bs4 import BeautifulSoup
 from langchain_core.documents import Document
 
+# Import the anti‑block manager
+from .anti_block import AntiBlockManager
+
 logger = logging.getLogger(__name__)
 
 try:
@@ -21,22 +25,23 @@ try:
 except ImportError:
     PLAYWRIGHT_AVAILABLE = False
 
+# Global anti‑block instance
+_anti_block = AntiBlockManager()
+
 def crawl_website(start_url: str, max_pages: int = 50, use_js: bool = False) -> List[Document]:
     """
     Crawl a website starting from start_url, up to max_pages.
     Returns a list of Documents with page text and metadata.
+    Uses anti‑block strategies to avoid detection.
     """
     visited = set()
     queue = deque([start_url])
     docs = []
     domain = urlparse(start_url).netloc
 
-    headers = {
-        'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36'
-    }
-
     # For JS crawling, we might need a persistent browser
     browser = None
+    playwright = None
     if use_js and PLAYWRIGHT_AVAILABLE:
         playwright = sync_playwright().start()
         browser = playwright.chromium.launch(headless=True)
@@ -47,16 +52,33 @@ def crawl_website(start_url: str, max_pages: int = 50, use_js: bool = False) -> 
             if url in visited:
                 continue
             logger.debug(f"Crawling {url}")
-            time.sleep(1)  # polite delay
+
+            # Introduce smart delay to mimic human behavior
+            _anti_block.smart_delay(base_delay=1.0)
 
             try:
                 if use_js and browser:
-                    page = browser.new_page()
+                    # For JS pages, we use Playwright (anti‑block not as critical,
+                    # but we can still set viewport and user agent)
+                    context = browser.new_context(
+                        viewport={'width': 1920, 'height': 1080},
+                        user_agent=_anti_block.get_headers()['User-Agent']
+                    )
+                    page = context.new_page()
                     page.goto(url, wait_until='networkidle')
                     content = page.content()
                     page.close()
+                    context.close()
                 else:
-                    resp = requests.get(url, headers=headers, timeout=30)
+                    # Static scraping with anti‑block headers and optional proxy
+                    headers = _anti_block.get_headers()
+                    proxies = _anti_block.get_proxy()  # None if no proxies configured
+                    resp = requests.get(
+                        url,
+                        headers=headers,
+                        proxies=proxies,
+                        timeout=30
+                    )
                     resp.raise_for_status()
                     content = resp.text
 
@@ -82,12 +104,19 @@ def crawl_website(start_url: str, max_pages: int = 50, use_js: bool = False) -> 
                     if urlparse(full_url).netloc == domain and full_url not in visited:
                         queue.append(full_url)
 
-            except Exception as e:
+            except requests.exceptions.RequestException as e:
                 logger.warning(f"Failed to crawl {url}: {e}")
+                # If it's a 429 (rate limit), the anti_block might have handled it,
+                # but we don't have the response object here. For now, just log and continue.
+                continue
+            except Exception as e:
+                logger.warning(f"Unexpected error on {url}: {e}")
+                continue
 
     finally:
         if browser:
             browser.close()
+        if playwright:
             playwright.stop()
 
     logger.info(f"Crawled {len(docs)} pages from {start_url}")

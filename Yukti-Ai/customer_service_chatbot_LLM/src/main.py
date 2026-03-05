@@ -221,6 +221,8 @@ def ensure_admin_user():
             c.execute("INSERT INTO users (username, password_hash, is_admin) VALUES (?, ?, 1)", ('admin1234', hashed))
             conn.commit()
             logger.info("Default admin user created")
+        else:
+            logger.info("Users already exist, skipping admin creation.")
         conn.close()
     except Exception as e:
         logger.error(f"Admin creation error: {e}")
@@ -345,7 +347,7 @@ def record_kb_metrics():
         logger.error(f"Failed to record KB metrics: {e}")
 
 # ----------------------------------------------------------------------
-# Admin data functions (unchanged, but width='stretch')
+# Admin data functions (with width='stretch')
 # ----------------------------------------------------------------------
 def get_all_users():
     try:
@@ -619,7 +621,7 @@ def save_rss_api_sources(sources):
         return False
 
 # ----------------------------------------------------------------------
-# Knowledge base updater thread
+# Knowledge base updater thread (fixed cross-device move)
 # ----------------------------------------------------------------------
 class KnowledgeBaseUpdater(threading.Thread):
     def __init__(self, check_interval=2):
@@ -700,7 +702,7 @@ if 'kb_updater' not in st.session_state:
     st.session_state.kb_updater.start()
 
 # ----------------------------------------------------------------------
-# Session state
+# Session state initialization (with web_search_enabled)
 # ----------------------------------------------------------------------
 if "logged_in" not in st.session_state:
     st.session_state.logged_in = False
@@ -719,7 +721,7 @@ if "logged_in" not in st.session_state:
     st.session_state.auto_refresh = False
     st.session_state.web_sources = load_web_sources()
     st.session_state.rss_api_sources = load_rss_api_sources()
-    st.session_state.web_search_enabled = False  # new toggle
+    st.session_state.web_search_enabled = False  # <-- ADDED
 
 # ----------------------------------------------------------------------
 # Login / Signup
@@ -850,130 +852,566 @@ with st.sidebar:
 # Admin dashboard or chat
 # ----------------------------------------------------------------------
 if st.session_state.admin_mode:
-    # Admin dashboard (same as before, omitted for brevity – keep existing code)
-    # (We'll not repeat the full admin dashboard here to save space, but it remains unchanged)
-    # ...
+    # -------------------- Admin Dashboard --------------------
     st.title("🛡️ Admin Dashboard")
-    # ... (existing admin code, with width='stretch' already applied)
+    st.caption(f"Logged in as {st.session_state.username} (Admin)")
+
+    # Record metrics periodically
+    now = time.time()
+    if now - st.session_state.last_metrics_record > 60:
+        record_system_metrics()
+        record_kb_metrics()
+        st.session_state.last_metrics_record = now
+
+    # Database diagnostics
+    with st.expander("🔍 Database Diagnostics", expanded=False):
+        stats = get_database_stats()
+        cols = st.columns(5)
+        cols[0].metric("Users", stats.get("users", 0))
+        cols[1].metric("User Activity", stats.get("user_activity", 0))
+        cols[2].metric("Tasks", stats.get("tasks", 0))
+        cols[3].metric("System Metrics", stats.get("system_metrics", 0))
+        cols[4].metric("KB Metrics", stats.get("kb_metrics", 0))
+
+    tabs = st.tabs(["📊 Overview", "👥 Users", "📈 Analytics", "📚 Knowledge Base", "📋 Tasks", "🤖 Insights", "⚙️ System"])
+
+    # ----- Overview Tab -----
+    with tabs[0]:
+        st.subheader("System Status")
+        col1, col2, col3, col4 = st.columns(4)
+        with col1:
+            st.metric("Total Users", len(get_all_users()))
+        with col2:
+            st.metric("KB Docs", get_document_count() or 0)
+        with col3:
+            st.metric("Active Tasks", len(get_active_tasks(st.session_state.user_id)))
+        with col4:
+            if VECTORDB_PATH.exists():
+                mtime = datetime.fromtimestamp(VECTORDB_PATH.stat().st_mtime)
+                st.metric("Last KB Update", mtime.strftime("%Y-%m-%d %H:%M"))
+            else:
+                st.metric("Last KB Update", "Never")
+
+        # Live system metrics
+        sys_metrics = get_system_metrics()
+        cols = st.columns(3)
+        cols[0].metric("CPU", f"{sys_metrics['cpu']:.1f}%")
+        cols[1].metric("Memory", f"{sys_metrics['memory']:.1f}%")
+        cols[2].metric("Disk", f"{sys_metrics['disk']:.1f}%")
+
+    # ----- Users Tab -----
+    with tabs[1]:
+        st.subheader("User Management")
+
+        with st.expander("➕ Add New User", expanded=False):
+            with st.form("add_user_form"):
+                col1, col2 = st.columns(2)
+                with col1:
+                    new_username = st.text_input("Username", key="add_user_username")
+                    new_password = st.text_input("Password", type="password", key="add_user_pass")
+                with col2:
+                    confirm_password = st.text_input("Confirm Password", type="password", key="add_user_confirm")
+                    new_is_admin = st.checkbox("Admin", key="add_user_admin")
+                submitted = st.form_submit_button("Create User")
+                if submitted:
+                    if new_password != confirm_password:
+                        st.error("Passwords do not match")
+                    elif not new_username or not new_password:
+                        st.error("Username and password required")
+                    else:
+                        ok, msg = create_user(new_username, new_password, new_is_admin)
+                        if ok:
+                            log_admin_action(st.session_state.user_id, "CREATE_USER", new_username)
+                            st.success("User created")
+                            st.rerun()
+                        else:
+                            st.error(msg)
+
+        users_df = get_user_message_counts()
+        if users_df.empty:
+            st.info("👥 No users found. Create one using the form above.")
+        else:
+            available_cols = users_df.columns.tolist()
+            display_columns = ['username', 'is_admin', 'created_at', 'total_messages']
+            optional_cols = ['success_rate', 'avg_response_time', 'last_active', 'most_used_model',
+                             'images_created', 'videos_created', 'audio_created']
+            for col in optional_cols:
+                if col in available_cols:
+                    display_columns.append(col)
+
+            display_df = users_df[display_columns].copy()
+            if 'success_rate' in display_df.columns:
+                display_df['success_rate'] = display_df['success_rate'].round(1).astype(str) + '%'
+            rename_map = {
+                'username': 'Username',
+                'is_admin': 'Admin',
+                'created_at': 'Registered',
+                'total_messages': 'Total Msgs',
+                'success_rate': 'Success %',
+                'avg_response_time': 'Avg Resp (ms)',
+                'last_active': 'Last Active',
+                'most_used_model': 'Fav Model',
+                'images_created': 'Images',
+                'videos_created': 'Videos',
+                'audio_created': 'Audio'
+            }
+            display_df = display_df.rename(columns={k: v for k, v in rename_map.items() if k in display_df.columns})
+            st.dataframe(display_df, width='stretch')
+
+            if st.session_state.debug_mode:
+                with st.expander("🔍 Raw User Data (Debug)"):
+                    st.dataframe(users_df, width='stretch')
+
+            st.markdown("### ✏️ Edit / Delete Users")
+            for _, row in users_df.iterrows():
+                if row['username'] == st.session_state.username:
+                    continue
+                with st.expander(f"{row['username']} (ID: {row['id']})"):
+                    col1, col2 = st.columns(2)
+                    with col1:
+                        new_name = st.text_input("Username", value=row['username'], key=f"name_{row['id']}")
+                        new_admin = st.checkbox("Admin", value=bool(row['is_admin']), key=f"admin_{row['id']}")
+                    with col2:
+                        new_pass = st.text_input("New Password (leave blank to keep)", type="password", key=f"pass_{row['id']}")
+                        if st.button("Update", key=f"update_{row['id']}"):
+                            ok, msg = update_user(row['id'], new_name, new_pass or None, new_admin)
+                            if ok:
+                                log_admin_action(st.session_state.user_id, "UPDATE_USER", new_name)
+                                st.success("User updated")
+                                st.rerun()
+                            else:
+                                st.error(msg)
+                    if st.button("🗑️ Delete", key=f"delete_{row['id']}"):
+                        if st.checkbox(f"Confirm delete {row['username']}", key=f"confirm_{row['id']}"):
+                            ok, msg = delete_user(row['id'])
+                            if ok:
+                                log_admin_action(st.session_state.user_id, "DELETE_USER", row['username'])
+                                st.success("User deleted")
+                                st.rerun()
+                            else:
+                                st.error(msg)
+
+    # ----- Analytics Tab -----
+    with tabs[2]:
+        st.subheader("Essential Performance Metrics")
+        conn = sqlite3.connect(str(DB_PATH))
+        total_queries = pd.read_sql_query("SELECT COUNT(*) as cnt FROM user_activity", conn)['cnt'][0]
+        total_errors = pd.read_sql_query("SELECT COUNT(*) as cnt FROM user_activity WHERE success=0", conn)['cnt'][0]
+        avg_latency = pd.read_sql_query("SELECT AVG(response_time_ms) as avg FROM user_activity", conn)['avg'][0] or 0
+        resolution_rate = ((total_queries - total_errors) / total_queries * 100) if total_queries > 0 else 0
+        fallback_rate = (total_errors / total_queries * 100) if total_queries > 0 else 0
+        conn.close()
+
+        col1, col2, col3, col4 = st.columns(4)
+        col1.metric("Avg Latency (ms)", f"{avg_latency:.0f}")
+        col2.metric("Resolution Rate", f"{resolution_rate:.1f}%")
+        col3.metric("Fallback Rate", f"{fallback_rate:.1f}%")
+        col4.metric("Task Completion (Video)", "N/A")
+
+        st.subheader("Model Performance Over Time")
+        perf = get_model_performance(30)
+        if perf.empty:
+            st.info("No model performance data yet.")
+        else:
+            fig1 = px.line(perf, x="day", y="avg_response", color="model_key",
+                           title="Average Response Time (ms) per Model")
+            st.plotly_chart(fig1, use_container_width=True)
+            perf['error_rate'] = perf['errors'] / perf['requests'] * 100
+            fig2 = px.line(perf, x="day", y="error_rate", color="model_key",
+                           title="Error Rate (%) per Model")
+            st.plotly_chart(fig2, use_container_width=True)
+
+        st.subheader("User Activity & Engagement")
+        act = get_user_activity_summary(30)
+        if act.empty:
+            st.info("No user activity data yet.")
+        else:
+            fig3 = px.line(act, x="day", y="active_users", title="Daily Active Users")
+            st.plotly_chart(fig3, use_container_width=True)
+            fig4 = px.line(act, x="day", y="total_queries", title="Daily Queries")
+            st.plotly_chart(fig4, use_container_width=True)
+
+        st.subheader("System Health")
+        sys_hist = get_system_metrics_history(24)
+        if sys_hist.empty:
+            st.info("No system metrics yet.")
+        else:
+            fig5 = px.line(sys_hist, x="time", y=["cpu", "memory", "disk"],
+                           title="System Resources (24h)")
+            st.plotly_chart(fig5, use_container_width=True)
+
+        st.subheader("Model Quality Radar")
+        st.caption("(Placeholder – requires faithfulness, toxicity, etc.)")
+        categories = ['Intelligence', 'Coherence', 'Relevance', 'Fluency']
+        values = [85, 90, 88, 92]
+        fig6 = go.Figure(data=go.Scatterpolar(r=values, theta=categories, fill='toself'))
+        fig6.update_layout(polar=dict(radialaxis=dict(visible=True, range=[0,100])))
+        st.plotly_chart(fig6, use_container_width=True)
+
+    # ----- Knowledge Base Tab -----
+    with tabs[3]:
+        st.subheader("Knowledge Base Management")
+        col1, col2 = st.columns(2)
+        with col1:
+            st.metric("Documents", get_document_count() or 0)
+        with col2:
+            if VECTORDB_PATH.exists():
+                size = sum(f.stat().st_size for f in VECTORDB_PATH.glob("*") if f.is_file()) / (1024*1024)
+                st.metric("Index Size", f"{size:.2f} MB")
+            else:
+                st.metric("Index Size", "N/A")
+
+        kb_hist = get_kb_history(30)
+        if kb_hist.empty:
+            st.info("📚 No knowledge base history yet. It will appear after the first rebuild.")
+        else:
+            if 'time' in kb_hist.columns and 'doc_count' in kb_hist.columns:
+                fig = px.line(kb_hist, x="time", y="doc_count", title="Document Count Over Time")
+                st.plotly_chart(fig, use_container_width=True)
+
+        st.markdown("### ⚙️ Auto‑Update Status")
+        st.success("✅ Auto‑update is running in background (checks every 2 seconds, rebuilds if changes detected).")
+
+        with st.expander("📤 Upload Files", expanded=False):
+            st.markdown("Upload CSV, TXT, or PDF files to add to the knowledge base. Changes will be picked up automatically.")
+            uploaded_files = st.file_uploader(
+                "Choose files",
+                type=["csv", "txt", "pdf"],
+                accept_multiple_files=True,
+                key="kb_upload"
+            )
+            if uploaded_files and st.button("Upload Files"):
+                for uploaded_file in uploaded_files:
+                    file_path = UPLOADS_PATH / uploaded_file.name
+                    with open(file_path, "wb") as f:
+                        f.write(uploaded_file.getbuffer())
+                    st.success(f"Saved {uploaded_file.name}")
+                st.info("Auto‑update will detect changes within 2 seconds and rebuild.")
+
+        with st.expander("🌐 RSS & API", expanded=False):
+            st.markdown("Configure RSS feeds and APIs.")
+            if "rss_api_sources" not in st.session_state:
+                st.session_state.rss_api_sources = load_rss_api_sources()
+            config = st.session_state.rss_api_sources
+
+            st.subheader("RSS Feeds")
+            for i, feed in enumerate(config.get("rss", [])):
+                cols = st.columns([3, 1, 1])
+                with cols[0]:
+                    feed["name"] = st.text_input(f"Name", value=feed.get("name", ""), key=f"rss_name_{i}")
+                    feed["url"] = st.text_input(f"URL", value=feed.get("url", ""), key=f"rss_url_{i}")
+                with cols[1]:
+                    feed["enabled"] = st.checkbox("Enabled", value=feed.get("enabled", True), key=f"rss_enabled_{i}")
+                with cols[2]:
+                    if st.button("Remove", key=f"rss_remove_{i}"):
+                        config["rss"].pop(i)
+                        st.rerun()
+            if st.button("➕ Add RSS Feed"):
+                config["rss"].append({"name": "", "url": "", "enabled": True})
+                st.rerun()
+
+            st.subheader("APIs")
+            for i, api in enumerate(config.get("api", [])):
+                cols = st.columns([3, 1, 1])
+                with cols[0]:
+                    api["name"] = st.text_input(f"Name", value=api.get("name", ""), key=f"api_name_{i}")
+                    api["url"] = st.text_input(f"URL", value=api.get("url", ""), key=f"api_url_{i}")
+                with cols[1]:
+                    api["enabled"] = st.checkbox("Enabled", value=api.get("enabled", True), key=f"api_enabled_{i}")
+                with cols[2]:
+                    if st.button("Remove", key=f"api_remove_{i}"):
+                        config["api"].pop(i)
+                        st.rerun()
+            if st.button("➕ Add API"):
+                config["api"].append({"name": "", "url": "", "enabled": True})
+                st.rerun()
+
+            if st.button("💾 Save RSS/API Sources"):
+                if save_rss_api_sources(config):
+                    st.success("Sources saved! They will be used in the next knowledge base rebuild.")
+                else:
+                    st.error("Failed to save sources. Check logs.")
+
+        with st.expander("🕷️ Website Crawling", expanded=False):
+            st.markdown("Configure websites to crawl entirely. The system will discover and index all pages from these sites.")
+            st.caption("Enable/disable each source with the checkbox. Click 'Save Web Sources' to persist changes.")
+
+            web_sources = st.session_state.web_sources
+            websites = web_sources.get("websites", [])
+
+            for i, site in enumerate(websites):
+                cols = st.columns([2, 3, 1, 1, 1])
+                with cols[0]:
+                    site["name"] = st.text_input("Name", value=site.get("name", ""), key=f"ws_name_{i}")
+                with cols[1]:
+                    site["url"] = st.text_input("URL", value=site.get("url", ""), key=f"ws_url_{i}")
+                with cols[2]:
+                    site["max_pages"] = st.number_input("Max Pages", value=site.get("max_pages", 50),
+                                                         min_value=1, max_value=1000, key=f"ws_pages_{i}")
+                with cols[3]:
+                    site["use_javascript"] = st.checkbox("JS Required", value=site.get("use_javascript", False),
+                                                          key=f"ws_js_{i}")
+                with cols[4]:
+                    site["enabled"] = st.checkbox("Enable", value=site.get("enabled", False), key=f"ws_enable_{i}")
+
+            if st.button("➕ Add Website"):
+                websites.append({
+                    "name": "",
+                    "url": "",
+                    "max_pages": 50,
+                    "use_javascript": False,
+                    "enabled": False
+                })
+                st.rerun()
+
+            if st.button("💾 Save Web Sources"):
+                web_sources["websites"] = websites
+                if save_web_sources(web_sources):
+                    st.session_state.web_sources = web_sources
+                    st.success("Web sources saved! They will be used in the next knowledge base rebuild.")
+                else:
+                    st.error("Failed to save web sources. Check logs.")
+
+    # ----- Tasks Tab -----
+    with tabs[4]:
+        st.subheader("Active Tasks")
+        active = get_active_tasks(st.session_state.user_id)
+        if active:
+            for task_id, variant, status, prog in active:
+                cols = st.columns([2,2,2,2])
+                cols[0].write(f"**{variant}**")
+                cols[1].write(f"`{task_id[:8]}`")
+                cols[2].write(status)
+                if status == 'processing':
+                    cols[3].progress(prog/100)
+                else:
+                    cols[3].write("—")
+        else:
+            st.info("⏳ No active tasks.")
+        st.subheader("Task History")
+        hist = get_task_history(user_id=st.session_state.user_id, limit=100)
+        if hist.empty:
+            st.info("📋 No task history yet.")
+        else:
+            st.dataframe(hist, width='stretch')
+
+    # ----- Insights Tab -----
+    with tabs[5]:
+        st.subheader("AI‑Powered Insights")
+        conn = sqlite3.connect(str(DB_PATH))
+        model_err = pd.read_sql_query("""
+            SELECT model_key, COUNT(*) as total, SUM(CASE WHEN success=0 THEN 1 ELSE 0 END) as errors
+            FROM user_activity
+            WHERE timestamp >= datetime('now', '-7 days')
+            GROUP BY model_key
+        """, conn)
+        user_growth = pd.read_sql_query("""
+            SELECT DATE(created_at) as day, COUNT(*) as new_users
+            FROM users
+            WHERE created_at >= datetime('now', '-30 days')
+            GROUP BY day
+        """, conn)
+        conn.close()
+
+        col1, col2 = st.columns(2)
+        with col1:
+            st.markdown("#### 📈 Model Health")
+            if not model_err.empty:
+                for _, row in model_err.iterrows():
+                    err_rate = row['errors'] / row['total'] * 100 if row['total'] > 0 else 0
+                    if err_rate > 10:
+                        st.warning(f"⚠️ {row['model_key']} error rate: {err_rate:.1f}%")
+                    else:
+                        st.success(f"✅ {row['model_key']} error rate: {err_rate:.1f}%")
+            else:
+                st.info("No model data last 7 days.")
+
+        with col2:
+            st.markdown("#### 👥 User Growth")
+            if not user_growth.empty:
+                total_new = user_growth['new_users'].sum()
+                st.metric("New Users (30d)", total_new)
+                if len(user_growth) > 7:
+                    last_week = user_growth.tail(7)['new_users'].mean()
+                    st.info(f"Avg {last_week:.1f} new users/day last week")
+            else:
+                st.info("No new users.")
+
+        st.markdown("#### 🧠 Knowledge Base")
+        if VECTORDB_PATH.exists():
+            mtime = datetime.fromtimestamp(VECTORDB_PATH.stat().st_mtime)
+            kb_age = (datetime.now() - mtime).days
+            if kb_age > 7:
+                st.warning(f"KB is {kb_age} days old. Consider rebuilding.")
+            else:
+                st.success(f"KB is {kb_age} days old (fresh).")
+        else:
+            st.info("KB not built yet.")
+
+        st.markdown("#### 📊 System Recommendations")
+        sys_metrics = get_system_metrics()
+        recs = []
+        if sys_metrics["cpu"] > 80:
+            recs.append("⚠️ CPU >80% – consider scaling up.")
+        if sys_metrics["memory"] > 80:
+            recs.append("⚠️ Memory >80% – increase RAM.")
+        if sys_metrics["disk"] > 85:
+            recs.append("⚠️ Disk >85% – clean up.")
+        if not recs:
+            recs.append("✅ All systems nominal.")
+        for r in recs:
+            st.write(r)
+
+        st.markdown("#### 🔮 Forecast (Next 7 Days)")
+        st.caption("Based on recent activity trends")
+        act = get_user_activity_summary(14)
+        if not act.empty and len(act) > 7:
+            avg_queries = act['total_queries'].tail(7).mean()
+            st.info(f"Expected daily queries: ~{int(avg_queries)}")
+        else:
+            st.info("Insufficient data for forecast.")
+
+    # ----- System Tab -----
+    with tabs[6]:
+        st.subheader("System Control")
+        if st.button("📥 Export Analytics"):
+            import io
+            out = io.BytesIO()
+            with pd.ExcelWriter(out, engine='xlsxwriter') as w:
+                get_model_performance(30).to_excel(w, sheet_name="Model")
+                get_user_activity_summary(30).to_excel(w, sheet_name="Activity")
+                get_system_metrics_history(24).to_excel(w, sheet_name="System")
+                get_kb_history(30).to_excel(w, sheet_name="KB")
+                get_task_history(user_id=None, limit=100).to_excel(w, sheet_name="Tasks")
+            st.download_button("Download", data=out.getvalue(), file_name=f"yukti_export_{datetime.now():%Y%m%d}.xlsx")
+        st.subheader("Log Viewer")
+        log_viewer("updater.log", 50)
+
+    # Auto-refresh logic
+    if st.session_state.auto_refresh:
+        time.sleep(10)
+        st.rerun()
+
     st.stop()
 
-# -------------------- Chat Interface --------------------
-for msg in st.session_state.messages:
-    with st.chat_message(msg["role"]):
-        st.markdown(msg["content"])
-        if "media" in msg:
-            for m in msg["media"]:
-                if m["type"] == "image":
-                    st.image(m["url"], width=300)
-                elif m["type"] == "audio":
-                    st.audio(m["url"])
-                elif m["type"] == "video":
-                    st.video(m["url"])
-        if "sources" in msg:
-            with st.expander("📚 Sources"):
-                for source in msg["sources"]:
-                    st.markdown(f"- [{source}]({source})")
+else:
+    # -------------------- Chat Interface --------------------
+    for msg in st.session_state.messages:
+        with st.chat_message(msg["role"]):
+            st.markdown(msg["content"])
+            if "media" in msg:
+                for m in msg["media"]:
+                    if m["type"] == "image":
+                        st.image(m["url"], width=300)
+                    elif m["type"] == "audio":
+                        st.audio(m["url"])
+                    elif m["type"] == "video":
+                        st.video(m["url"])
+            if "sources" in msg:
+                with st.expander("📚 Sources"):
+                    for source in msg["sources"]:
+                        st.markdown(f"- [{source}]({source})")
 
-if prompt := st.chat_input("Type your message..."):
-    start = time.time()
-    st.session_state.processing = True
-    uploaded = None
-    if uploaded_file:
-        import tempfile
-        with tempfile.NamedTemporaryFile(delete=False, suffix=Path(uploaded_file.name).suffix) as tmp:
-            tmp.write(uploaded_file.getvalue())
-            uploaded = tmp.name
+    if prompt := st.chat_input("Type your message..."):
+        start = time.time()
+        st.session_state.processing = True
+        uploaded = None
+        if uploaded_file:
+            import tempfile
+            with tempfile.NamedTemporaryFile(delete=False, suffix=Path(uploaded_file.name).suffix) as tmp:
+                tmp.write(uploaded_file.getvalue())
+                uploaded = tmp.name
 
-    lang_info = detect_language(prompt)
-    if lang_info['explicit_instruction']:
-        st.session_state.conversation_language = lang_info['explicit_instruction']
-    elif st.session_state.conversation_language is None:
-        st.session_state.conversation_language = lang_info['language']
+        lang_info = detect_language(prompt)
+        if lang_info['explicit_instruction']:
+            st.session_state.conversation_language = lang_info['explicit_instruction']
+        elif st.session_state.conversation_language is None:
+            st.session_state.conversation_language = lang_info['language']
 
-    st.session_state.messages.append({"role": "user", "content": prompt})
-    with st.chat_message("user"):
-        st.markdown(prompt)
+        st.session_state.messages.append({"role": "user", "content": prompt})
+        with st.chat_message("user"):
+            st.markdown(prompt)
 
-    with st.chat_message("assistant"):
-        placeholder = st.empty()
-        try:
-            model_key = st.session_state.selected_model
-            extra = {}
-            if uploaded:
-                extra["image_url"] = uploaded
+        with st.chat_message("assistant"):
+            placeholder = st.empty()
+            try:
+                model_key = st.session_state.selected_model
+                extra = {}
+                if uploaded:
+                    extra["image_url"] = uploaded
 
-            # Check if web search toggle is enabled
-            if st.session_state.web_search_enabled:
-                # Use think with web_search flag
-                hist = [{"role": m["role"], "content": m["content"]} for m in st.session_state.messages[-10:]]
-                result = think(prompt, hist, model_key, language=st.session_state.conversation_language, web_search=True)
-            else:
-                # Normal think
-                if model_key in ["Yukti‑Flash", "Yukti‑Quantum"]:
-                    if not check_kb_status():
-                        ans = "KB not ready. Please wait for auto‑update to complete."
-                        placeholder.markdown(ans)
-                        result = {"type": "sync", "answer": ans}
-                    else:
-                        hist = [{"role": m["role"], "content": m["content"]} for m in st.session_state.messages[-10:]]
-                        result = think(prompt, hist, model_key, language=st.session_state.conversation_language)
+                # Check if web search toggle is enabled
+                if st.session_state.web_search_enabled:
+                    # Use think with web_search flag
+                    hist = [{"role": m["role"], "content": m["content"]} for m in st.session_state.messages[-10:]]
+                    result = think(prompt, hist, model_key, language=st.session_state.conversation_language, web_search=True)
                 else:
-                    model = load_model(model_key)
-                    if model_key == "Yukti‑Audio":
-                        path = model.invoke(prompt, voice="female", language=st.session_state.conversation_language, **extra)
-                        with open(path, "rb") as f:
-                            audio = f.read()
-                        st.audio(audio)
-                        st.download_button("Download Audio", audio, "audio.wav")
-                        ans = "Audio generated."
-                        result = {"type": "sync", "answer": ans, "media": [{"type": "audio", "url": path}]}
-                    elif model_key == "Yukti‑Image":
-                        url = model.invoke(prompt, **extra)
-                        st.image(url, width=300)
-                        st.download_button("Download Image", requests.get(url).content, "image.png")
-                        ans = "Image generated."
-                        result = {"type": "sync", "answer": ans, "media": [{"type": "image", "url": url}]}
-                    elif model_key == "Yukti‑Video":
-                        tid = model.invoke(prompt, language=st.session_state.conversation_language, user_id=st.session_state.user_id, **extra)
-                        st.session_state.tasks[tid] = {"variant": "Yukti‑Video", "status": "submitted", "progress": 0}
-                        ans = f"Task {tid} started."
-                        result = {"type": "async", "task_id": tid}
+                    # Normal think
+                    if model_key in ["Yukti‑Flash", "Yukti‑Quantum"]:
+                        if not check_kb_status():
+                            ans = "KB not ready. Please wait for auto‑update to complete."
+                            placeholder.markdown(ans)
+                            result = {"type": "sync", "answer": ans}
+                        else:
+                            hist = [{"role": m["role"], "content": m["content"]} for m in st.session_state.messages[-10:]]
+                            result = think(prompt, hist, model_key, language=st.session_state.conversation_language)
                     else:
-                        hist = [{"role": m["role"], "content": m["content"]} for m in st.session_state.messages[-10:]]
-                        result = think(prompt, hist, model_key, language=st.session_state.conversation_language)
+                        model = load_model(model_key)
+                        if model_key == "Yukti‑Audio":
+                            path = model.invoke(prompt, voice="female", language=st.session_state.conversation_language, **extra)
+                            with open(path, "rb") as f:
+                                audio = f.read()
+                            st.audio(audio)
+                            st.download_button("Download Audio", audio, "audio.wav")
+                            ans = "Audio generated."
+                            result = {"type": "sync", "answer": ans, "media": [{"type": "audio", "url": path}]}
+                        elif model_key == "Yukti‑Image":
+                            url = model.invoke(prompt, **extra)
+                            st.image(url, width=300)
+                            st.download_button("Download Image", requests.get(url).content, "image.png")
+                            ans = "Image generated."
+                            result = {"type": "sync", "answer": ans, "media": [{"type": "image", "url": url}]}
+                        elif model_key == "Yukti‑Video":
+                            tid = model.invoke(prompt, language=st.session_state.conversation_language, user_id=st.session_state.user_id, **extra)
+                            st.session_state.tasks[tid] = {"variant": "Yukti‑Video", "status": "submitted", "progress": 0}
+                            ans = f"Task {tid} started."
+                            result = {"type": "async", "task_id": tid}
+                        else:
+                            hist = [{"role": m["role"], "content": m["content"]} for m in st.session_state.messages[-10:]]
+                            result = think(prompt, hist, model_key, language=st.session_state.conversation_language)
 
-            if result.get("type") == "sync":
-                ans = result.get("answer", "")
-                if result.get("monologue"):
-                    with st.expander("Reasoning"):
-                        st.markdown(result["monologue"])
-                placeholder.markdown(ans)
+                if result.get("type") == "sync":
+                    ans = result.get("answer", "")
+                    if result.get("monologue"):
+                        with st.expander("Reasoning"):
+                            st.markdown(result["monologue"])
+                    placeholder.markdown(ans)
 
-                if result.get("sources"):
-                    with st.expander("📚 Sources"):
-                        for source in result["sources"]:
-                            if hasattr(source, 'metadata') and source.metadata.get('source'):
-                                url = source.metadata['source']
-                                st.markdown(f"- [{url}]({url})")
-                            elif isinstance(source, str):
-                                st.markdown(f"- [{source}]({source})")
+                    if result.get("sources"):
+                        with st.expander("📚 Sources"):
+                            for source in result["sources"]:
+                                if hasattr(source, 'metadata') and source.metadata.get('source'):
+                                    url = source.metadata['source']
+                                    st.markdown(f"- [{url}]({url})")
+                                elif isinstance(source, str):
+                                    st.markdown(f"- [{source}]({source})")
 
+                    log_user_activity(st.session_state.user_id, model_key, len(prompt),
+                                      int((time.time()-start)*1000), True)
+                    st.session_state.messages.append({
+                        "role": "assistant",
+                        "content": ans,
+                        "media": result.get("media", []),
+                        "sources": result.get("sources", [])
+                    })
+                elif result.get("type") == "async":
+                    st.info(f"Task {result['task_id']} submitted. Check sidebar.")
+                    st.session_state.messages.append({"role": "assistant", "content": ans})
+            except Exception as e:
+                st.error(f"Error: {e}")
+                logger.exception("Chat error")
                 log_user_activity(st.session_state.user_id, model_key, len(prompt),
-                                  int((time.time()-start)*1000), True)
-                st.session_state.messages.append({
-                    "role": "assistant",
-                    "content": ans,
-                    "media": result.get("media", []),
-                    "sources": result.get("sources", [])
-                })
-            elif result.get("type") == "async":
-                st.info(f"Task {result['task_id']} submitted. Check sidebar.")
-                st.session_state.messages.append({"role": "assistant", "content": ans})
-        except Exception as e:
-            st.error(f"Error: {e}")
-            logger.exception("Chat error")
-            log_user_activity(st.session_state.user_id, model_key, len(prompt),
-                              int((time.time()-start)*1000), False, str(e))
+                                  int((time.time()-start)*1000), False, str(e))
 
-    st.session_state.processing = False
-    st.rerun()
+        st.session_state.processing = False
+        st.rerun()

@@ -14,14 +14,22 @@ from typing import List, Dict, Any, Optional
 
 from langchain_core.documents import Document
 from langchain_community.document_loaders import CSVLoader, TextLoader, PyPDFLoader
-from bs4 import BeautifulSoup
 
-# For JavaScript‑heavy sites
+# Optional imports with graceful fallback – type ignores suppress Pylance warnings
 try:
-    from playwright.sync_api import sync_playwright
+    from bs4 import BeautifulSoup  # type: ignore
+    BS4_AVAILABLE = True
+except ImportError:
+    BS4_AVAILABLE = False
+    BeautifulSoup = None
+    logging.warning("BeautifulSoup not installed – web scraping disabled.")
+
+try:
+    from playwright.sync_api import sync_playwright  # type: ignore
     PLAYWRIGHT_AVAILABLE = True
 except ImportError:
     PLAYWRIGHT_AVAILABLE = False
+    logging.warning("Playwright not installed – JavaScript scraping disabled.")
 
 from .config import DATASET_PATH, UPLOADS_PATH, SOURCES
 
@@ -120,7 +128,6 @@ def fetch_websites() -> List[Document]:
         use_js = site.get("use_javascript", False)
         logger.info(f"Crawling {url} (max {max_pages} pages, JS={use_js})")
         try:
-            # We'll use a simple crawler – for production, consider using a dedicated library like `crawlfish`
             from .crawler import crawl_website
             site_docs = crawl_website(url, max_pages, use_js)
             docs.extend(site_docs)
@@ -175,6 +182,9 @@ class WebScraper:
 
     def scrape_static(self, url: str) -> Optional[str]:
         """Scrape a static page using requests + BeautifulSoup."""
+        if not BS4_AVAILABLE:
+            logger.error("BeautifulSoup not installed. Cannot scrape static pages.")
+            return None
         if not self._check_robots(url):
             logger.warning(f"robots.txt disallows scraping {url}")
             return None
@@ -217,6 +227,8 @@ class WebScraper:
                     page.wait_for_selector(wait_for_selector, timeout=10000)
                 content = page.content()
                 browser.close()
+                if not BS4_AVAILABLE:
+                    return content  # fallback to raw HTML
                 soup = BeautifulSoup(content, 'html.parser')
                 for script in soup(["script", "style"]):
                     script.decompose()

@@ -1,7 +1,7 @@
 """
 Main Streamlit application for Yukti AI.
 Includes hardcoded admin credentials (admin1234/admin1234) and a full admin dashboard.
-Knowledge base updates automatically in the background (manual update button removed).
+Knowledge base updates automatically in the background.
 Now supports on‑demand web scraping for user queries.
 """
 
@@ -341,25 +341,38 @@ def record_system_metrics():
         logger.error(f"Failed to record system metrics: {e}")
 
 def record_kb_metrics():
+    """Record knowledge base metrics, creating the table if it doesn't exist."""
     count = get_document_count()
     if count is None:
         return
     try:
+        # Get index size (if exists)
         index_size = 0
         if VECTORDB_PATH.exists():
             for f in VECTORDB_PATH.glob("*"):
                 if f.is_file():
                     index_size += f.stat().st_size
+
         conn = sqlite3.connect(str(DB_PATH))
         c = conn.cursor()
-        c.execute("INSERT INTO kb_metrics (doc_count, index_size) VALUES (?, ?)", (count, index_size))
+        # Ensure the table exists (self‑contained)
+        c.execute('''CREATE TABLE IF NOT EXISTS kb_metrics (
+            id INTEGER PRIMARY KEY AUTOINCREMENT,
+            doc_count INTEGER,
+            index_size INTEGER,
+            timestamp TIMESTAMP DEFAULT CURRENT_TIMESTAMP
+        )''')
+        c.execute(
+            "INSERT INTO kb_metrics (doc_count, index_size) VALUES (?, ?)",
+            (count, index_size)
+        )
         conn.commit()
         conn.close()
     except Exception as e:
         logger.error(f"Failed to record KB metrics: {e}")
 
 # ----------------------------------------------------------------------
-# Enhanced admin data functions (unchanged, but ensure use_container_width replaced)
+# Enhanced admin data functions (unchanged, but replace use_container_width with width='stretch')
 # ----------------------------------------------------------------------
 def get_all_users():
     try:
@@ -602,7 +615,7 @@ def get_database_stats():
     return stats
 
 # ----------------------------------------------------------------------
-# Web scraping configuration management (updated to use files)
+# Web scraping configuration management (unchanged)
 # ----------------------------------------------------------------------
 def load_web_sources():
     """Load web scraping sources from web_sources.json."""
@@ -649,7 +662,7 @@ def save_rss_api_sources(sources):
         return False
 
 # ----------------------------------------------------------------------
-# Background knowledge base updater thread (FIXED)
+# Background knowledge base updater thread (unchanged, but uses improved record_kb_metrics)
 # ----------------------------------------------------------------------
 class KnowledgeBaseUpdater(threading.Thread):
     """Background thread that checks for changes and rebuilds index if needed."""
@@ -676,12 +689,9 @@ class KnowledgeBaseUpdater(threading.Thread):
         if VECTORDB_PATH.exists():
             index_mtime = VECTORDB_PATH.stat().st_mtime
 
-        # Helper to check if a file should trigger rebuild
         def should_rebuild(file_path: Path, current_mtime: float) -> bool:
-            # If no index, always rebuild
             if index_mtime is None:
                 return True
-            # If file is newer than index, rebuild
             return current_mtime > index_mtime
 
         # Check dataset.csv
@@ -723,13 +733,11 @@ class KnowledgeBaseUpdater(threading.Thread):
             return
         logger.info("Auto-rebuilding knowledge base...")
         success = rebuild_index()
-        self.last_rebuild_time = now  # always update to prevent rapid retries
+        self.last_rebuild_time = now
         if success:
-            # Update session state status
             if 'kb_status' in st.session_state:
                 st.session_state.kb_status = get_kb_detailed_status()
-            # Record metrics
-            record_kb_metrics()
+            record_kb_metrics()   # now safe even if table missing
             logger.info("Auto-rebuild completed.")
         else:
             logger.error("Auto-rebuild failed.")
@@ -767,7 +775,7 @@ if "logged_in" not in st.session_state:
     st.session_state.rss_api_sources = load_rss_api_sources()
 
 # ----------------------------------------------------------------------
-# Login / Signup UI (unchanged)
+# Login / Signup UI
 # ----------------------------------------------------------------------
 if not st.session_state.logged_in:
     st.title("Yukti AI")
@@ -813,7 +821,6 @@ if not st.session_state.logged_in:
 with st.sidebar:
     st.markdown(f"### 👤 {st.session_state.username}")
     if st.button("🚪 Logout", use_container_width=True):
-        # Stop background updater before logout
         if 'kb_updater' in st.session_state:
             st.session_state.kb_updater.stop()
         for key in list(st.session_state.keys()):
@@ -940,7 +947,7 @@ if st.session_state.admin_mode:
         cols[1].metric("Memory", f"{sys_metrics['memory']:.1f}%")
         cols[2].metric("Disk", f"{sys_metrics['disk']:.1f}%")
 
-    # ----- Users Tab (unchanged, but replace use_container_width with width='stretch') -----
+    # ----- Users Tab -----
     with tabs[1]:
         st.subheader("User Management")
 
@@ -997,7 +1004,7 @@ if st.session_state.admin_mode:
                 'audio_created': 'Audio'
             }
             display_df = display_df.rename(columns={k: v for k, v in rename_map.items() if k in display_df.columns})
-            st.dataframe(display_df, width='stretch')  # replaced
+            st.dataframe(display_df, width='stretch')  # replaced use_container_width
 
             if st.session_state.debug_mode:
                 with st.expander("🔍 Raw User Data (Debug)"):
@@ -1032,7 +1039,7 @@ if st.session_state.admin_mode:
                             else:
                                 st.error(msg)
 
-    # ----- Analytics Tab (unchanged) -----
+    # ----- Analytics Tab -----
     with tabs[2]:
         st.subheader("Essential Performance Metrics")
         conn = sqlite3.connect(str(DB_PATH))
@@ -1089,7 +1096,7 @@ if st.session_state.admin_mode:
         fig6.update_layout(polar=dict(radialaxis=dict(visible=True, range=[0,100])))
         st.plotly_chart(fig6, use_container_width=True)
 
-    # ----- Knowledge Base Tab (with Web Scraping) -----
+    # ----- Knowledge Base Tab -----
     with tabs[3]:
         st.subheader("Knowledge Base Management")
         col1, col2 = st.columns(2)
@@ -1131,7 +1138,6 @@ if st.session_state.admin_mode:
 
         with st.expander("🌐 RSS & API", expanded=False):
             st.markdown("Configure RSS feeds and APIs.")
-            # Use session state as working copy
             if "rss_api_sources" not in st.session_state:
                 st.session_state.rss_api_sources = load_rss_api_sources()
             config = st.session_state.rss_api_sources
@@ -1214,7 +1220,7 @@ if st.session_state.admin_mode:
                 else:
                     st.error("Failed to save web sources. Check logs.")
 
-    # ----- Tasks Tab (unchanged) -----
+    # ----- Tasks Tab -----
     with tabs[4]:
         st.subheader("Active Tasks")
         active = get_active_tasks(st.session_state.user_id)
@@ -1237,7 +1243,7 @@ if st.session_state.admin_mode:
         else:
             st.dataframe(hist, width='stretch')  # replaced
 
-    # ----- Insights Tab (unchanged) -----
+    # ----- Insights Tab -----
     with tabs[5]:
         st.subheader("AI‑Powered Insights")
         conn = sqlite3.connect(str(DB_PATH))
@@ -1313,7 +1319,7 @@ if st.session_state.admin_mode:
         else:
             st.info("Insufficient data for forecast.")
 
-    # ----- System Tab (unchanged) -----
+    # ----- System Tab -----
     with tabs[6]:
         st.subheader("System Control")
         if st.button("📥 Export Analytics"):
@@ -1337,7 +1343,7 @@ if st.session_state.admin_mode:
     st.stop()
 
 else:
-    # -------------------- Chat Interface (enhanced with dynamic web scraping) --------------------
+    # -------------------- Chat Interface --------------------
     for msg in st.session_state.messages:
         with st.chat_message(msg["role"]):
             st.markdown(msg["content"])
@@ -1382,7 +1388,6 @@ else:
                 if uploaded:
                     extra["image_url"] = uploaded
 
-                # Check if the user wants to scrape a website (simple heuristic: contains "scrape" or a URL)
                 import re
                 url_match = re.search(r'(https?://[^\s]+)', prompt)
                 if url_match and ("scrape" in prompt.lower() or "get content" in prompt.lower()):
@@ -1391,7 +1396,6 @@ else:
                     with st.spinner(f"Scraping {url}..."):
                         scraped_text = scrape_url(url, use_js)
                     if scraped_text:
-                        # Truncate if too long
                         if len(scraped_text) > 2000:
                             scraped_text = scraped_text[:2000] + "... (truncated)"
                         answer = f"Here's the content I scraped from {url}:\n\n{scraped_text}"
@@ -1439,11 +1443,9 @@ else:
                             st.markdown(result["monologue"])
                     placeholder.markdown(ans)
 
-                    # Display sources if any
                     if result.get("sources"):
                         with st.expander("📚 Sources"):
                             for source in result["sources"]:
-                                # source may be a Document object or a string
                                 if hasattr(source, 'metadata') and source.metadata.get('source'):
                                     url = source.metadata['source']
                                     st.markdown(f"- [{url}]({url})")

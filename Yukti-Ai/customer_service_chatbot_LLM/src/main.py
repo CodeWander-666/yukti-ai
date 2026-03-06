@@ -1,6 +1,8 @@
 """
 Main Streamlit application for Yukti AI.
-Includes admin dashboard, knowledge base auto-updater, and optional web search.
+Includes hardcoded admin credentials (admin1234/admin1234) and a full admin dashboard.
+Knowledge base updates automatically in the background (manual update button removed).
+Now supports on‑demand web scraping for user queries.
 """
 
 import os
@@ -21,10 +23,12 @@ import plotly.graph_objects as go
 import bcrypt
 import requests
 
+# Add project root to path
 PROJECT_ROOT = Path(__file__).parent.parent.absolute()
 if str(PROJECT_ROOT) not in sys.path:
     sys.path.insert(0, str(PROJECT_ROOT))
 
+# Local imports
 try:
     from config import (
         BASE_DIR,
@@ -44,13 +48,14 @@ except ImportError:
     ZHIPU_API_KEY = os.getenv("ZHIPU_API_KEY", "")
     GOOGLE_API_KEY = os.getenv("GOOGLE_API_KEY", "")
 
+# Define UPLOADS_PATH globally
 UPLOADS_PATH = BASE_DIR / "data" / "uploads"
 UPLOADS_PATH.mkdir(parents=True, exist_ok=True)
 
+# Paths for source JSON files
 SOURCES_FILE = BASE_DIR / "knowledge_updater" / "sources.json"
 WEBSITES_FILE = BASE_DIR / "knowledge_updater" / "web_sources.json"
 
-# Import langchain_helper with fallback
 try:
     from langchain_helper import (
         create_vector_db,
@@ -58,12 +63,9 @@ try:
         get_document_count,
         check_kb_status,
     )
-    LANGCHAIN_HELPER_AVAILABLE = True
-except ImportError as e:
-    logging.error(f"Failed to import langchain_helper: {e}")
-    LANGCHAIN_HELPER_AVAILABLE = False
+except ImportError:
     def create_vector_db(): return False
-    def get_kb_detailed_status(): return {"ready": False, "error": "Module not loaded"}
+    def get_kb_detailed_status(): return {"ready": False, "error": "Not implemented"}
     def get_document_count(): return None
     def check_kb_status(): return False
 
@@ -96,6 +98,7 @@ try:
 except ImportError:
     def detect_language(text): return {"language": "en", "method": "fallback", "explicit_instruction": None}
 
+# Import UI helpers
 try:
     from ui_helpers import render_task, show_error_toast, show_success_toast, confirm_dialog, metric_card, log_viewer
 except ImportError:
@@ -106,6 +109,7 @@ except ImportError:
     def metric_card(label, value, delta=None): st.metric(label, value, delta)
     def log_viewer(path, max_lines): st.info("Log viewer not available")
 
+# Import knowledge updater components
 try:
     from knowledge_updater.builder import rebuild_index
     from knowledge_updater.connectors import scrape_url
@@ -115,19 +119,24 @@ except ImportError:
     def rebuild_index(): return False
     def scrape_url(url, use_js=False): return None
 
+# Configure logging
 logging.basicConfig(level=logging.INFO, format='%(asctime)s - %(name)s - %(levelname)s - %(message)s')
 logger = logging.getLogger(__name__)
 
+# ----------------------------------------------------------------------
+# Page config
+# ----------------------------------------------------------------------
 st.set_page_config(page_title="Yukti AI", page_icon="🚀", layout="wide", initial_sidebar_state="expanded")
 
 # ----------------------------------------------------------------------
-# Database initialization
+# Database initialization (ensure tasks table has user_id)
 # ----------------------------------------------------------------------
 def init_db():
+    """Create all tables if they don't exist."""
     try:
-        DB_PATH.parent.mkdir(parents=True, exist_ok=True)
         conn = sqlite3.connect(str(DB_PATH))
         c = conn.cursor()
+
         c.execute('''CREATE TABLE IF NOT EXISTS users (
             id INTEGER PRIMARY KEY AUTOINCREMENT,
             username TEXT UNIQUE NOT NULL,
@@ -135,6 +144,7 @@ def init_db():
             is_admin INTEGER DEFAULT 0,
             created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
         )''')
+
         c.execute('''CREATE TABLE IF NOT EXISTS user_activity (
             id INTEGER PRIMARY KEY AUTOINCREMENT,
             user_id INTEGER,
@@ -146,6 +156,7 @@ def init_db():
             timestamp TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
             FOREIGN KEY(user_id) REFERENCES users(id)
         )''')
+
         c.execute('''CREATE TABLE IF NOT EXISTS model_metrics (
             id INTEGER PRIMARY KEY AUTOINCREMENT,
             model_key TEXT,
@@ -156,6 +167,7 @@ def init_db():
             error_count INTEGER,
             UNIQUE(model_key, period, period_start)
         )''')
+
         c.execute('''CREATE TABLE IF NOT EXISTS system_metrics (
             id INTEGER PRIMARY KEY AUTOINCREMENT,
             cpu REAL,
@@ -163,12 +175,14 @@ def init_db():
             disk REAL,
             timestamp TIMESTAMP DEFAULT CURRENT_TIMESTAMP
         )''')
+
         c.execute('''CREATE TABLE IF NOT EXISTS kb_metrics (
             id INTEGER PRIMARY KEY AUTOINCREMENT,
             doc_count INTEGER,
             index_size INTEGER,
             timestamp TIMESTAMP DEFAULT CURRENT_TIMESTAMP
         )''')
+
         c.execute('''CREATE TABLE IF NOT EXISTS admin_actions (
             id INTEGER PRIMARY KEY AUTOINCREMENT,
             admin_id INTEGER,
@@ -177,6 +191,7 @@ def init_db():
             timestamp TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
             FOREIGN KEY(admin_id) REFERENCES users(id)
         )''')
+
         c.execute('''CREATE TABLE IF NOT EXISTS tasks (
             task_id TEXT PRIMARY KEY,
             variant TEXT,
@@ -189,6 +204,8 @@ def init_db():
             completed_at TIMESTAMP,
             user_id INTEGER
         )''')
+
+        # Indexes
         c.execute("CREATE INDEX IF NOT EXISTS idx_users_username ON users(username)")
         c.execute("CREATE INDEX IF NOT EXISTS idx_users_is_admin ON users(is_admin)")
         c.execute("CREATE INDEX IF NOT EXISTS idx_user_activity_user ON user_activity(user_id)")
@@ -197,42 +214,43 @@ def init_db():
         c.execute("CREATE INDEX IF NOT EXISTS idx_system_metrics_timestamp ON system_metrics(timestamp)")
         c.execute("CREATE INDEX IF NOT EXISTS idx_kb_metrics_timestamp ON kb_metrics(timestamp)")
         c.execute("CREATE INDEX IF NOT EXISTS idx_tasks_user_id ON tasks(user_id)")
+
         conn.commit()
         conn.close()
-        logger.info("Database initialized successfully at %s", DB_PATH)
-        return True
+        logger.info("Database initialized successfully")
     except Exception as e:
         logger.exception("Database initialization failed")
-        return False
+        st.error(f"Database error: {e}")
+        st.stop()
 
-if not init_db():
-    st.stop()
+init_db()
 
 # ----------------------------------------------------------------------
-# Admin user creation (only if empty)
+# Ensure default admin user exists
 # ----------------------------------------------------------------------
 def ensure_admin_user():
     try:
         conn = sqlite3.connect(str(DB_PATH))
         c = conn.cursor()
-        c.execute("SELECT COUNT(*) FROM users")
-        if c.fetchone()[0] == 0:
+        c.execute("SELECT id FROM users WHERE username = 'admin1234'")
+        if not c.fetchone():
             hashed = bcrypt.hashpw(b'admin1234', bcrypt.gensalt()).decode('utf-8')
-            c.execute("INSERT INTO users (username, password_hash, is_admin) VALUES (?, ?, 1)", ('admin1234', hashed))
+            c.execute(
+                "INSERT INTO users (username, password_hash, is_admin) VALUES (?, ?, 1)",
+                ('admin1234', hashed)
+            )
             conn.commit()
-            logger.info("Default admin user created")
-        else:
-            logger.info("Users already exist, skipping admin creation.")
+            logger.info("Default admin user created (admin1234/admin1234)")
         conn.close()
     except Exception as e:
-        logger.error(f"Admin creation error: {e}")
+        logger.error(f"Failed to create default admin: {e}")
 
 ensure_admin_user()
 
 # ----------------------------------------------------------------------
-# Authentication helpers
+# Authentication helpers (unchanged)
 # ----------------------------------------------------------------------
-def authenticate(username, password):
+def authenticate(username: str, password: str) -> Tuple[bool, Optional[int], bool]:
     try:
         conn = sqlite3.connect(str(DB_PATH))
         c = conn.cursor()
@@ -246,7 +264,7 @@ def authenticate(username, password):
         logger.exception("Authentication error")
         return False, None, False
 
-def register_user(username, password):
+def register_user(username: str, password: str) -> Tuple[bool, str]:
     if not username or not password:
         return False, "Username and password required"
     if len(username) < 3 or len(password) < 6:
@@ -280,7 +298,7 @@ def log_user_activity(user_id, model_key, prompt_length, response_time_ms, succe
     except Exception as e:
         logger.error(f"Failed to log user activity: {e}")
 
-def log_admin_action(admin_id, action, details=""):
+def log_admin_action(admin_id: int, action: str, details: str = ""):
     try:
         conn = sqlite3.connect(str(DB_PATH))
         c = conn.cursor()
@@ -291,7 +309,7 @@ def log_admin_action(admin_id, action, details=""):
         logger.error(f"Failed to log admin action: {e}")
 
 # ----------------------------------------------------------------------
-# System metrics
+# System metrics (unchanged)
 # ----------------------------------------------------------------------
 try:
     import psutil
@@ -334,12 +352,6 @@ def record_kb_metrics():
                     index_size += f.stat().st_size
         conn = sqlite3.connect(str(DB_PATH))
         c = conn.cursor()
-        c.execute('''CREATE TABLE IF NOT EXISTS kb_metrics (
-            id INTEGER PRIMARY KEY AUTOINCREMENT,
-            doc_count INTEGER,
-            index_size INTEGER,
-            timestamp TIMESTAMP DEFAULT CURRENT_TIMESTAMP
-        )''')
         c.execute("INSERT INTO kb_metrics (doc_count, index_size) VALUES (?, ?)", (count, index_size))
         conn.commit()
         conn.close()
@@ -347,7 +359,7 @@ def record_kb_metrics():
         logger.error(f"Failed to record KB metrics: {e}")
 
 # ----------------------------------------------------------------------
-# Admin data functions (with width='stretch')
+# Enhanced admin data functions (unchanged, but ensure use_container_width replaced)
 # ----------------------------------------------------------------------
 def get_all_users():
     try:
@@ -360,6 +372,7 @@ def get_all_users():
         return pd.DataFrame(columns=["id", "username", "is_admin", "created_at"])
 
 def get_user_message_counts():
+    """Return user stats including message counts and media generation counts."""
     try:
         conn = sqlite3.connect(str(DB_PATH))
         query = """
@@ -392,25 +405,36 @@ def get_user_message_counts():
         """
         df = pd.read_sql_query(query, conn)
         conn.close()
+
         if not df.empty:
             numeric_cols = ['total_messages', 'successful', 'failed', 'avg_response_time',
                             'images_created', 'videos_created', 'audio_created']
             for col in numeric_cols:
                 df[col] = pd.to_numeric(df[col], errors='coerce').fillna(0)
+
             df['success_rate'] = (df['successful'] / df['total_messages'].replace(0, 1)) * 100
+
             df['created_at'] = pd.to_datetime(df['created_at']).dt.strftime('%Y-%m-%d %H:%M')
             df['last_active'] = pd.to_datetime(df['last_active']).dt.strftime('%Y-%m-%d %H:%M')
             df['avg_response_time'] = df['avg_response_time'].round(0).astype(int)
         else:
-            df = pd.DataFrame(columns=['id', 'username', 'is_admin', 'created_at', 'total_messages',
-                'successful', 'failed', 'avg_response_time', 'last_active', 'most_used_model', 'success_rate',
-                'images_created', 'videos_created', 'audio_created'])
+            df = pd.DataFrame(columns=[
+                'id', 'username', 'is_admin', 'created_at', 'total_messages',
+                'successful', 'failed', 'avg_response_time', 'last_active',
+                'most_used_model', 'success_rate',
+                'images_created', 'videos_created', 'audio_created'
+            ])
         return df
     except Exception as e:
         logger.exception("get_user_message_counts failed")
-        return pd.DataFrame(columns=['id', 'username', 'is_admin', 'created_at', 'total_messages',
-                'successful', 'failed', 'avg_response_time', 'last_active', 'most_used_model', 'success_rate',
-                'images_created', 'videos_created', 'audio_created'])
+        if st.session_state.get('debug_mode', False):
+            st.error(f"🔴 Error in get_user_message_counts: {e}")
+        return pd.DataFrame(columns=[
+            'id', 'username', 'is_admin', 'created_at', 'total_messages',
+            'successful', 'failed', 'avg_response_time', 'last_active',
+            'most_used_model', 'success_rate',
+            'images_created', 'videos_created', 'audio_created'
+        ])
 
 def update_user(user_id, username, password, is_admin):
     try:
@@ -578,9 +602,10 @@ def get_database_stats():
     return stats
 
 # ----------------------------------------------------------------------
-# Web source management
+# Web scraping configuration management (updated to use files)
 # ----------------------------------------------------------------------
 def load_web_sources():
+    """Load web scraping sources from web_sources.json."""
     if WEBSITES_FILE.exists():
         try:
             with open(WEBSITES_FILE, 'r') as f:
@@ -590,17 +615,19 @@ def load_web_sources():
     return {"websites": []}
 
 def save_web_sources(sources):
+    """Save web scraping sources to web_sources.json."""
     try:
         WEBSITES_FILE.parent.mkdir(parents=True, exist_ok=True)
         with open(WEBSITES_FILE, 'w') as f:
             json.dump(sources, f, indent=2)
-        logger.info("Web sources saved")
+        logger.info("Web sources saved to web_sources.json")
         return True
     except Exception as e:
         logger.error(f"Failed to save web sources: {e}")
         return False
 
 def load_rss_api_sources():
+    """Load RSS/API sources from sources.json."""
     if SOURCES_FILE.exists():
         try:
             with open(SOURCES_FILE, 'r') as f:
@@ -610,85 +637,85 @@ def load_rss_api_sources():
     return {"rss": [], "api": []}
 
 def save_rss_api_sources(sources):
+    """Save RSS/API sources to sources.json."""
     try:
         SOURCES_FILE.parent.mkdir(parents=True, exist_ok=True)
         with open(SOURCES_FILE, 'w') as f:
             json.dump(sources, f, indent=2)
-        logger.info("RSS/API sources saved")
+        logger.info("RSS/API sources saved to sources.json")
         return True
     except Exception as e:
         logger.error(f"Failed to save sources: {e}")
         return False
 
 # ----------------------------------------------------------------------
-# Knowledge base updater thread (fixed cross-device move)
+# Background knowledge base updater thread (FIXED)
 # ----------------------------------------------------------------------
 class KnowledgeBaseUpdater(threading.Thread):
+    """Background thread that checks for changes and rebuilds index if needed."""
     def __init__(self, check_interval=2):
         super().__init__(daemon=True)
         self.check_interval = check_interval
         self.last_rebuild_time = 0
-        self.last_known_mtimes = {}
+        self.last_known_mtimes = {}  # file -> mtime
         self.running = True
 
     def run(self):
-        logger.info("KB updater started.")
+        logger.info("Knowledge base auto-updater started.")
         while self.running:
             try:
                 self._check_and_rebuild()
             except Exception as e:
-                logger.exception("KB updater error")
+                logger.exception("Error in KB updater thread")
             time.sleep(self.check_interval)
 
     def _check_and_rebuild(self):
-        index_mtime = None
-        if VECTORDB_PATH.exists():
-            index_mtime = VECTORDB_PATH.stat().st_mtime
-
-        def should_rebuild(file_path, current_mtime):
-            if index_mtime is None:
-                return True
-            return current_mtime > index_mtime
-
-        dataset_path = BASE_DIR / "dataset" / "dataset.csv"
+        """Check if any source file has changed; if so, rebuild."""
+        # Check dataset.csv
+        dataset_path = PROJECT_ROOT / "dataset" / "dataset.csv"
         if dataset_path.exists():
             mtime = dataset_path.stat().st_mtime
-            if should_rebuild(dataset_path, mtime):
-                logger.info(f"Change detected in {dataset_path}")
+            if dataset_path not in self.last_known_mtimes or self.last_known_mtimes[dataset_path] != mtime:
+                logger.info(f"Change detected in {dataset_path}. Scheduling rebuild.")
                 self._trigger_rebuild()
                 self.last_known_mtimes[dataset_path] = mtime
                 return
 
+        # Check uploads directory
         if UPLOADS_PATH.exists():
             for file_path in UPLOADS_PATH.glob("*"):
                 if file_path.is_file():
                     mtime = file_path.stat().st_mtime
-                    if should_rebuild(file_path, mtime):
-                        logger.info(f"Change detected in {file_path}")
+                    if file_path not in self.last_known_mtimes or self.last_known_mtimes[file_path] != mtime:
+                        logger.info(f"Change detected in {file_path}. Scheduling rebuild.")
                         self._trigger_rebuild()
                         self.last_known_mtimes[file_path] = mtime
                         return
 
+        # Also check sources.json and web_sources.json for changes
         for config_file in [SOURCES_FILE, WEBSITES_FILE]:
             if config_file.exists():
                 mtime = config_file.stat().st_mtime
-                if should_rebuild(config_file, mtime):
-                    logger.info(f"Change detected in {config_file}")
+                if config_file not in self.last_known_mtimes or self.last_known_mtimes[config_file] != mtime:
+                    logger.info(f"Change detected in {config_file}. Scheduling rebuild.")
                     self._trigger_rebuild()
                     self.last_known_mtimes[config_file] = mtime
                     return
 
     def _trigger_rebuild(self):
+        """Rebuild index if at least 60 seconds passed since last rebuild."""
         now = time.time()
         if now - self.last_rebuild_time < 60:
-            logger.info("Skipping rebuild – too recent.")
+            logger.info("Skipping rebuild – last rebuild too recent.")
             return
         logger.info("Auto-rebuilding knowledge base...")
         success = rebuild_index()
-        self.last_rebuild_time = now
+        self.last_rebuild_time = now  # always update to prevent rapid retries
         if success:
+            # Update session state status
             if 'kb_status' in st.session_state:
                 st.session_state.kb_status = get_kb_detailed_status()
+            # Record metrics
             record_kb_metrics()
             logger.info("Auto-rebuild completed.")
         else:
@@ -697,12 +724,13 @@ class KnowledgeBaseUpdater(threading.Thread):
     def stop(self):
         self.running = False
 
+# Start background updater if not already running
 if 'kb_updater' not in st.session_state:
     st.session_state.kb_updater = KnowledgeBaseUpdater(check_interval=2)
     st.session_state.kb_updater.start()
 
 # ----------------------------------------------------------------------
-# Session state initialization (with web_search_enabled)
+# Session state initialization
 # ----------------------------------------------------------------------
 if "logged_in" not in st.session_state:
     st.session_state.logged_in = False
@@ -714,21 +742,25 @@ if "logged_in" not in st.session_state:
     st.session_state.tasks = {}
     st.session_state.conversation_language = None
     st.session_state.kb_status = get_kb_detailed_status()
+    st.session_state.clear_input = False
     st.session_state.processing = False
     st.session_state.uploaded_file = None
     st.session_state.last_metrics_record = 0
     st.session_state.debug_mode = False
     st.session_state.auto_refresh = False
+    # Load web sources
     st.session_state.web_sources = load_web_sources()
+    # Load RSS/API sources
     st.session_state.rss_api_sources = load_rss_api_sources()
-    st.session_state.web_search_enabled = False  # <-- ADDED
 
 # ----------------------------------------------------------------------
-# Login / Signup
+# Login / Signup UI (unchanged)
 # ----------------------------------------------------------------------
 if not st.session_state.logged_in:
     st.title("Yukti AI")
+    st.subheader("Please log in to continue")
     tab1, tab2 = st.tabs(["Login", "Sign Up"])
+
     with tab1:
         with st.form("login_form"):
             username = st.text_input("Username")
@@ -744,6 +776,7 @@ if not st.session_state.logged_in:
                     st.rerun()
                 else:
                     st.error("Invalid username or password")
+
     with tab2:
         with st.form("signup_form"):
             new_username = st.text_input("Username")
@@ -762,15 +795,16 @@ if not st.session_state.logged_in:
     st.stop()
 
 # ----------------------------------------------------------------------
-# Sidebar
+# Main app after login
 # ----------------------------------------------------------------------
 with st.sidebar:
     st.markdown(f"### 👤 {st.session_state.username}")
     if st.button("🚪 Logout", use_container_width=True):
+        # Stop background updater before logout
         if 'kb_updater' in st.session_state:
             st.session_state.kb_updater.stop()
-        for key in ["logged_in", "user_id", "username", "is_admin", "admin_mode", "messages", "tasks", "debug_mode"]:
-            if key in st.session_state:
+        for key in list(st.session_state.keys()):
+            if key in ["logged_in", "user_id", "username", "is_admin", "admin_mode", "messages", "tasks", "debug_mode"]:
                 del st.session_state[key]
         st.rerun()
 
@@ -779,11 +813,13 @@ with st.sidebar:
         if admin_mode != st.session_state.admin_mode:
             st.session_state.admin_mode = admin_mode
             st.rerun()
-        debug_mode = st.checkbox("🔧 Debug Mode", value=st.session_state.debug_mode)
+
+        debug_mode = st.checkbox("🔧 Debug Mode", value=st.session_state.get("debug_mode", False))
         if debug_mode != st.session_state.debug_mode:
             st.session_state.debug_mode = debug_mode
             st.rerun()
-        auto_refresh = st.checkbox("🔄 Auto-refresh (every 10s)", value=st.session_state.auto_refresh)
+
+        auto_refresh = st.checkbox("🔄 Auto-refresh (every 10s)", value=st.session_state.get("auto_refresh", False))
         if auto_refresh != st.session_state.auto_refresh:
             st.session_state.auto_refresh = auto_refresh
             st.rerun()
@@ -814,15 +850,7 @@ with st.sidebar:
         st.markdown("❌ **Not Ready**")
         if kb_status["error"]:
             st.caption(f"Error: {kb_status['error']}")
-    st.divider()
-
-    # New toggle for web search
-    st.markdown("### 🌐 Web Search")
-    web_search_toggle = st.checkbox("Enable live web search", value=st.session_state.web_search_enabled,
-                                    help="When enabled, your queries may fetch live data from the web (sources will be shown).")
-    if web_search_toggle != st.session_state.web_search_enabled:
-        st.session_state.web_search_enabled = web_search_toggle
-        st.rerun()
+    # Manual update button removed – auto-update only
     st.divider()
 
     if ZHIPU_AVAILABLE:
@@ -956,11 +984,11 @@ if st.session_state.admin_mode:
                 'audio_created': 'Audio'
             }
             display_df = display_df.rename(columns={k: v for k, v in rename_map.items() if k in display_df.columns})
-            st.dataframe(display_df, width='stretch')
+            st.dataframe(display_df, width='stretch')  # replaced
 
             if st.session_state.debug_mode:
                 with st.expander("🔍 Raw User Data (Debug)"):
-                    st.dataframe(users_df, width='stretch')
+                    st.dataframe(users_df, width='stretch')  # replaced
 
             st.markdown("### ✏️ Edit / Delete Users")
             for _, row in users_df.iterrows():
@@ -991,7 +1019,7 @@ if st.session_state.admin_mode:
                             else:
                                 st.error(msg)
 
-    # ----- Analytics Tab -----
+    # ----- Analytics Tab (unchanged) -----
     with tabs[2]:
         st.subheader("Essential Performance Metrics")
         conn = sqlite3.connect(str(DB_PATH))
@@ -1048,7 +1076,7 @@ if st.session_state.admin_mode:
         fig6.update_layout(polar=dict(radialaxis=dict(visible=True, range=[0,100])))
         st.plotly_chart(fig6, use_container_width=True)
 
-    # ----- Knowledge Base Tab -----
+    # ----- Knowledge Base Tab (with Web Scraping) -----
     with tabs[3]:
         st.subheader("Knowledge Base Management")
         col1, col2 = st.columns(2)
@@ -1172,7 +1200,7 @@ if st.session_state.admin_mode:
                 else:
                     st.error("Failed to save web sources. Check logs.")
 
-    # ----- Tasks Tab -----
+    # ----- Tasks Tab (unchanged) -----
     with tabs[4]:
         st.subheader("Active Tasks")
         active = get_active_tasks(st.session_state.user_id)
@@ -1193,9 +1221,9 @@ if st.session_state.admin_mode:
         if hist.empty:
             st.info("📋 No task history yet.")
         else:
-            st.dataframe(hist, width='stretch')
+            st.dataframe(hist, width='stretch')  # replaced
 
-    # ----- Insights Tab -----
+    # ----- Insights Tab (unchanged) -----
     with tabs[5]:
         st.subheader("AI‑Powered Insights")
         conn = sqlite3.connect(str(DB_PATH))
@@ -1271,7 +1299,7 @@ if st.session_state.admin_mode:
         else:
             st.info("Insufficient data for forecast.")
 
-    # ----- System Tab -----
+    # ----- System Tab (unchanged) -----
     with tabs[6]:
         st.subheader("System Control")
         if st.button("📥 Export Analytics"):
@@ -1295,7 +1323,7 @@ if st.session_state.admin_mode:
     st.stop()
 
 else:
-    # -------------------- Chat Interface --------------------
+    # -------------------- Chat Interface (enhanced with dynamic web scraping) --------------------
     for msg in st.session_state.messages:
         with st.chat_message(msg["role"]):
             st.markdown(msg["content"])
@@ -1310,7 +1338,8 @@ else:
             if "sources" in msg:
                 with st.expander("📚 Sources"):
                     for source in msg["sources"]:
-                        st.markdown(f"- [{source}]({source})")
+                        if source and source != "Unknown source":
+                            st.markdown(f"- [{source}]({source})")
 
     if prompt := st.chat_input("Type your message..."):
         start = time.time()
@@ -1340,45 +1369,55 @@ else:
                 if uploaded:
                     extra["image_url"] = uploaded
 
-                # Check if web search toggle is enabled
-                if st.session_state.web_search_enabled:
-                    # Use think with web_search flag
-                    hist = [{"role": m["role"], "content": m["content"]} for m in st.session_state.messages[-10:]]
-                    result = think(prompt, hist, model_key, language=st.session_state.conversation_language, web_search=True)
-                else:
-                    # Normal think
-                    if model_key in ["Yukti‑Flash", "Yukti‑Quantum"]:
-                        if not check_kb_status():
-                            ans = "KB not ready. Please wait for auto‑update to complete."
-                            placeholder.markdown(ans)
-                            result = {"type": "sync", "answer": ans}
-                        else:
-                            hist = [{"role": m["role"], "content": m["content"]} for m in st.session_state.messages[-10:]]
-                            result = think(prompt, hist, model_key, language=st.session_state.conversation_language)
+                # Check if the user wants to scrape a website (simple heuristic: contains a URL and keywords)
+                import re
+                url_match = re.search(r'(https?://[^\s]+)', prompt)
+                if url_match and ("scrape" in prompt.lower() or "get content" in prompt.lower() or "fetch" in prompt.lower()):
+                    url = url_match.group(0)
+                    use_js = "javascript" in prompt.lower() or "dynamic" in prompt.lower()
+                    with st.spinner(f"Scraping {url}..."):
+                        scraped_text = scrape_url(url, use_js)
+                    if scraped_text:
+                        # Truncate if too long
+                        if len(scraped_text) > 2000:
+                            scraped_text = scraped_text[:2000] + "... (truncated)"
+                        answer = f"Here's the content I scraped from {url}:\n\n{scraped_text}"
+                        result = {"type": "sync", "answer": answer, "sources": [url]}
                     else:
-                        model = load_model(model_key)
-                        if model_key == "Yukti‑Audio":
-                            path = model.invoke(prompt, voice="female", language=st.session_state.conversation_language, **extra)
-                            with open(path, "rb") as f:
-                                audio = f.read()
-                            st.audio(audio)
-                            st.download_button("Download Audio", audio, "audio.wav")
-                            ans = "Audio generated."
-                            result = {"type": "sync", "answer": ans, "media": [{"type": "audio", "url": path}]}
-                        elif model_key == "Yukti‑Image":
-                            url = model.invoke(prompt, **extra)
-                            st.image(url, width=300)
-                            st.download_button("Download Image", requests.get(url).content, "image.png")
-                            ans = "Image generated."
-                            result = {"type": "sync", "answer": ans, "media": [{"type": "image", "url": url}]}
-                        elif model_key == "Yukti‑Video":
-                            tid = model.invoke(prompt, language=st.session_state.conversation_language, user_id=st.session_state.user_id, **extra)
-                            st.session_state.tasks[tid] = {"variant": "Yukti‑Video", "status": "submitted", "progress": 0}
-                            ans = f"Task {tid} started."
-                            result = {"type": "async", "task_id": tid}
-                        else:
-                            hist = [{"role": m["role"], "content": m["content"]} for m in st.session_state.messages[-10:]]
-                            result = think(prompt, hist, model_key, language=st.session_state.conversation_language)
+                        answer = f"Failed to scrape {url}. The site may be blocking automated requests or requires JavaScript."
+                        result = {"type": "sync", "answer": answer}
+                elif model_key in ["Yukti‑Flash", "Yukti‑Quantum"]:
+                    if not check_kb_status():
+                        ans = "KB not ready. Please wait for auto‑update to complete."
+                        placeholder.markdown(ans)
+                        result = {"type": "sync", "answer": ans}
+                    else:
+                        hist = [{"role": m["role"], "content": m["content"]} for m in st.session_state.messages[-10:]]
+                        result = think(prompt, hist, model_key, language=st.session_state.conversation_language)
+                else:
+                    model = load_model(model_key)
+                    if model_key == "Yukti‑Audio":
+                        path = model.invoke(prompt, voice="female", language=st.session_state.conversation_language, **extra)
+                        with open(path, "rb") as f:
+                            audio = f.read()
+                        st.audio(audio)
+                        st.download_button("Download Audio", audio, "audio.wav")
+                        ans = "Audio generated."
+                        result = {"type": "sync", "answer": ans, "media": [{"type": "audio", "url": path}]}
+                    elif model_key == "Yukti‑Image":
+                        url = model.invoke(prompt, **extra)
+                        st.image(url, width=300)
+                        st.download_button("Download Image", requests.get(url).content, "image.png")
+                        ans = "Image generated."
+                        result = {"type": "sync", "answer": ans, "media": [{"type": "image", "url": url}]}
+                    elif model_key == "Yukti‑Video":
+                        tid = model.invoke(prompt, language=st.session_state.conversation_language, user_id=st.session_state.user_id, **extra)
+                        st.session_state.tasks[tid] = {"variant": "Yukti‑Video", "status": "submitted", "progress": 0}
+                        ans = f"Task {tid} started."
+                        result = {"type": "async", "task_id": tid}
+                    else:
+                        hist = [{"role": m["role"], "content": m["content"]} for m in st.session_state.messages[-10:]]
+                        result = think(prompt, hist, model_key, language=st.session_state.conversation_language)
 
                 if result.get("type") == "sync":
                     ans = result.get("answer", "")
@@ -1387,13 +1426,11 @@ else:
                             st.markdown(result["monologue"])
                     placeholder.markdown(ans)
 
+                    # Display sources if any
                     if result.get("sources"):
                         with st.expander("📚 Sources"):
                             for source in result["sources"]:
-                                if hasattr(source, 'metadata') and source.metadata.get('source'):
-                                    url = source.metadata['source']
-                                    st.markdown(f"- [{url}]({url})")
-                                elif isinstance(source, str):
+                                if source and source != "Unknown source":
                                     st.markdown(f"- [{source}]({source})")
 
                     log_user_activity(st.session_state.user_id, model_key, len(prompt),

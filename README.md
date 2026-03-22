@@ -295,6 +295,7 @@ Yukti AI demonstrates a complete, production‑ready chatbot that exceeds the re
 
 ---
 
-**Repository**: [https://github.com/CodeWander-666/yukti-ai](https://github.com/CodeWander-666/yukti-ai)  
+**Repository**: [https://github.com/CodeWander-666/yukti-ai](https://github.com/CodeWander-666/yukti-ai)
+**Collab Notebook** : [https://colab.research.google.com/drive/1ZshQQ4eMDWWQZmWBEuE0pkWNlnxXGNzD?usp=sharing]
 **Author**: NIKHIL SINGH
 **Date**: March 2026

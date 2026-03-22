@@ -25,6 +25,7 @@ from config import (
     MODEL_CONCURRENCY,
     TASK_POLL_INTERVAL,
     DB_PATH,
+    MEDICAL_VECTORDB_PATH,  # used to check availability
 )
 
 # Import language utilities
@@ -107,6 +108,15 @@ _MODEL_REGISTRY = {
         "type": "sync",
         "concurrency_limit": MODEL_CONCURRENCY.get("gemini", 60),
         "description": "Google Gemini (dynamic selection)"
+    },
+    # Added for Yukti‑Doctor – this model is not actually used directly;
+    # it's a placeholder to make the service appear in the UI.
+    "medical-llama-3-70b": {
+        "model_id": "medical-llama-3-70b",
+        "provider": "local",
+        "type": "sync",
+        "concurrency_limit": 10,
+        "description": "Medical LLM for Yukti‑Doctor (powered by MedQuAD & retrieval)"
     }
 }
 
@@ -117,7 +127,8 @@ SERVICES = {
     "Yukti‑Image": ["cogview-3-flash", "cogview-4"],
     "Yukti‑Video": ["cogvideox-3", "cogvideox-flash"],
     "Yukti‑Audio": ["glm-4-voice"],
-    "Gemini": ["gemini"]
+    "Gemini": ["gemini"],
+    "Yukti‑Doctor": ["medical-llama-3-70b"],
 }
 
 # Availability flags (derived from API keys)
@@ -673,6 +684,11 @@ class YuktiModel:
                     result = self._call_zhipu_model(model_key, prompt, **kwargs)
                 elif self.provider == "gemini":
                     result = self._call_gemini_model(prompt, **kwargs)
+                elif self.provider == "local":
+                    # For Yukti‑Doctor, we don't call a model here; the logic is in medical.py
+                    # But if we ever have a local model, we could implement it.
+                    # For now, raise an error to indicate that this service should be handled elsewhere.
+                    raise RuntimeError("Yukti‑Doctor should be handled by medical.py, not model_manager.")
                 else:
                     raise ValueError(f"Unknown provider: {self.provider}")
                 return result
@@ -725,7 +741,7 @@ def load_model(service: str) -> YuktiModel:
     return YuktiModel(service)
 
 def get_available_models() -> List[str]:
-    """Return list of service names that are currently available (based on API keys)."""
+    """Return list of service names that are currently available (based on API keys and local resources)."""
     available = []
     for service in SERVICES:
         if service in ["Yukti‑Flash", "Yukti‑Quantum", "Yukti‑Image", "Yukti‑Video", "Yukti‑Audio"]:
@@ -739,6 +755,10 @@ def get_available_models() -> List[str]:
                     available.append(service)
                 except ImportError:
                     pass
+        elif service == "Yukti‑Doctor":
+            # Yukti‑Doctor is available if the medical index exists (or we can always show it)
+            if MEDICAL_VECTORDB_PATH.exists():
+                available.append(service)
     return available
 
 def get_service_config(service: str) -> Optional[Dict[str, Any]]:

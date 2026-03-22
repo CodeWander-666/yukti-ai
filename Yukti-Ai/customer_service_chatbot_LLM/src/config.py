@@ -74,3 +74,11 @@ ENABLE_TRANSFORMER = os.getenv("ENABLE_TRANSFORMER", "false").lower() == "true"
 # Database path (shared with task queue)
 # ----------------------------------------------------------------------
 DB_PATH = BASE_DIR / "yukti_tasks.db"
+
+# ----------------------------------------------------------------------
+# Medical knowledge base paths (ADDED FOR YUKTI-DOCTOR)
+# ----------------------------------------------------------------------
+MEDICAL_DATASET_PATH = BASE_DIR / "dataset" / "medical"          # Folder containing MedQuAD and other sources
+MEDICAL_VECTORDB_PATH = Path(os.getenv("MEDICAL_FAISS_PATH", BASE_DIR / "medical_faiss_index"))
+MEDICAL_UPLOADS_PATH = BASE_DIR / "data" / "medical_uploads"
+MEDICAL_UPLOADS_PATH.mkdir(parents=True, exist_ok=True)

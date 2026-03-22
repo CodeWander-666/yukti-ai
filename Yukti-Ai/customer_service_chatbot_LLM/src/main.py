@@ -62,12 +62,14 @@ try:
         get_kb_detailed_status,
         get_document_count,
         check_kb_status,
+        load_medical_vectorstore,
     )
 except ImportError:
     def create_vector_db(): return False
     def get_kb_detailed_status(): return {"ready": False, "error": "Not implemented"}
     def get_document_count(): return None
     def check_kb_status(): return False
+    def load_medical_vectorstore(): return None
 
 try:
     from think import think
@@ -118,6 +120,15 @@ except ImportError:
     KB_UPDATER_AVAILABLE = False
     def rebuild_index(): return False
     def scrape_url(url, use_js=False): return None
+
+# Import medical module for Yukti‑Doctor
+try:
+    from medical import think_medical
+    MEDICAL_AVAILABLE = True
+except ImportError:
+    MEDICAL_AVAILABLE = False
+    def think_medical(*args, **kwargs):
+        return {"type": "sync", "answer": "Medical module not available."}
 
 # Configure logging
 logging.basicConfig(level=logging.INFO, format='%(asctime)s - %(name)s - %(levelname)s - %(message)s')
@@ -205,6 +216,18 @@ def init_db():
             user_id INTEGER
         )''')
 
+        # medical_feedback table for Yukti‑Doctor
+        c.execute('''CREATE TABLE IF NOT EXISTS medical_feedback (
+            id INTEGER PRIMARY KEY AUTOINCREMENT,
+            user_id INTEGER,
+            query TEXT,
+            response TEXT,
+            rating INTEGER,
+            comment TEXT,
+            timestamp TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+            FOREIGN KEY(user_id) REFERENCES users(id)
+        )''')
+
         # Indexes
         c.execute("CREATE INDEX IF NOT EXISTS idx_users_username ON users(username)")
         c.execute("CREATE INDEX IF NOT EXISTS idx_users_is_admin ON users(is_admin)")
@@ -214,6 +237,7 @@ def init_db():
         c.execute("CREATE INDEX IF NOT EXISTS idx_system_metrics_timestamp ON system_metrics(timestamp)")
         c.execute("CREATE INDEX IF NOT EXISTS idx_kb_metrics_timestamp ON kb_metrics(timestamp)")
         c.execute("CREATE INDEX IF NOT EXISTS idx_tasks_user_id ON tasks(user_id)")
+        c.execute("CREATE INDEX IF NOT EXISTS idx_medical_feedback_user ON medical_feedback(user_id)")
 
         conn.commit()
         conn.close()
@@ -359,7 +383,7 @@ def record_kb_metrics():
         logger.error(f"Failed to record KB metrics: {e}")
 
 # ----------------------------------------------------------------------
-# Enhanced admin data functions (unchanged, but ensure use_container_width replaced)
+# Enhanced admin data functions
 # ----------------------------------------------------------------------
 def get_all_users():
     try:
@@ -649,7 +673,7 @@ def save_rss_api_sources(sources):
         return False
 
 # ----------------------------------------------------------------------
-# Background knowledge base updater thread (FIXED)
+# Background knowledge base updater thread (MODIFIED: monitors all CSVs)
 # ----------------------------------------------------------------------
 class KnowledgeBaseUpdater(threading.Thread):
     """Background thread that checks for changes and rebuilds index if needed."""
@@ -670,16 +694,19 @@ class KnowledgeBaseUpdater(threading.Thread):
             time.sleep(self.check_interval)
 
     def _check_and_rebuild(self):
-        """Check if any source file has changed; if so, rebuild."""
-        # Check dataset.csv
-        dataset_path = PROJECT_ROOT / "dataset" / "dataset.csv"
-        if dataset_path.exists():
-            mtime = dataset_path.stat().st_mtime
-            if dataset_path not in self.last_known_mtimes or self.last_known_mtimes[dataset_path] != mtime:
-                logger.info(f"Change detected in {dataset_path}. Scheduling rebuild.")
-                self._trigger_rebuild()
-                self.last_known_mtimes[dataset_path] = mtime
-                return
+        """Check all CSV files in dataset/ (excluding medical) for changes."""
+        dataset_dir = PROJECT_ROOT / "dataset"
+        if dataset_dir.exists():
+            for csv_file in dataset_dir.glob("**/*.csv"):
+                if "medical" in csv_file.parts:
+                    continue
+                if csv_file.is_file():
+                    mtime = csv_file.stat().st_mtime
+                    if csv_file not in self.last_known_mtimes or self.last_known_mtimes[csv_file] != mtime:
+                        logger.info(f"Change detected in {csv_file}. Scheduling rebuild.")
+                        self._trigger_rebuild()
+                        self.last_known_mtimes[csv_file] = mtime
+                        return
 
         # Check uploads directory
         if UPLOADS_PATH.exists():
@@ -831,15 +858,18 @@ with st.sidebar:
     selected_model = model_options[display_names.index(selected_display)]
     st.session_state.selected_model = selected_model
 
+    # File upload block
     uploaded_file = None
-    if selected_model in ["Yukti‑Video", "Yukti‑Image", "Yukti‑Audio"]:
+    if selected_model in ["Yukti‑Video", "Yukti‑Image", "Yukti‑Audio", "Yukti‑Doctor"]:
         st.markdown("### 📎 Attach File")
         if selected_model == "Yukti‑Video":
-            uploaded_file = st.file_uploader("Upload image", type=["png", "jpg", "jpeg"])
+            uploaded_file = st.file_uploader("Upload image", type=["png", "jpg", "jpeg"], key="video_upload")
         elif selected_model == "Yukti‑Image":
-            uploaded_file = st.file_uploader("Upload reference image", type=["png", "jpg", "jpeg"])
+            uploaded_file = st.file_uploader("Upload reference image", type=["png", "jpg", "jpeg"], key="image_upload")
         elif selected_model == "Yukti‑Audio":
-            uploaded_file = st.file_uploader("Upload audio", type=["mp3", "wav"])
+            uploaded_file = st.file_uploader("Upload audio", type=["mp3", "wav"], key="audio_upload")
+        elif selected_model == "Yukti‑Doctor":
+            uploaded_file = st.file_uploader("Upload medical report or image", type=["png", "jpg", "jpeg", "pdf"], key="medical_upload")
 
     st.divider()
     st.markdown("### 📚 Knowledge Base")
@@ -850,7 +880,6 @@ with st.sidebar:
         st.markdown("❌ **Not Ready**")
         if kb_status["error"]:
             st.caption(f"Error: {kb_status['error']}")
-    # Manual update button removed – auto-update only
     st.divider()
 
     if ZHIPU_AVAILABLE:
@@ -901,7 +930,8 @@ if st.session_state.admin_mode:
         cols[3].metric("System Metrics", stats.get("system_metrics", 0))
         cols[4].metric("KB Metrics", stats.get("kb_metrics", 0))
 
-    tabs = st.tabs(["📊 Overview", "👥 Users", "📈 Analytics", "📚 Knowledge Base", "📋 Tasks", "🤖 Insights", "⚙️ System"])
+    # Admin tabs
+    tabs = st.tabs(["📊 Overview", "👥 Users", "📈 Analytics", "📚 Knowledge Base", "📋 Tasks", "🤖 Insights", "⚙️ System", "🩺 Medical"])
 
     # ----- Overview Tab -----
     with tabs[0]:
@@ -927,7 +957,7 @@ if st.session_state.admin_mode:
         cols[1].metric("Memory", f"{sys_metrics['memory']:.1f}%")
         cols[2].metric("Disk", f"{sys_metrics['disk']:.1f}%")
 
-    # ----- Users Tab -----
+    # ----- Users Tab (unchanged) -----
     with tabs[1]:
         st.subheader("User Management")
 
@@ -984,11 +1014,11 @@ if st.session_state.admin_mode:
                 'audio_created': 'Audio'
             }
             display_df = display_df.rename(columns={k: v for k, v in rename_map.items() if k in display_df.columns})
-            st.dataframe(display_df, width='stretch')  # replaced
+            st.dataframe(display_df, width='stretch')
 
             if st.session_state.debug_mode:
                 with st.expander("🔍 Raw User Data (Debug)"):
-                    st.dataframe(users_df, width='stretch')  # replaced
+                    st.dataframe(users_df, width='stretch')
 
             st.markdown("### ✏️ Edit / Delete Users")
             for _, row in users_df.iterrows():
@@ -1221,7 +1251,7 @@ if st.session_state.admin_mode:
         if hist.empty:
             st.info("📋 No task history yet.")
         else:
-            st.dataframe(hist, width='stretch')  # replaced
+            st.dataframe(hist, width='stretch')
 
     # ----- Insights Tab (unchanged) -----
     with tabs[5]:
@@ -1315,6 +1345,21 @@ if st.session_state.admin_mode:
         st.subheader("Log Viewer")
         log_viewer("updater.log", 50)
 
+    # ----- Medical Tab -----
+    with tabs[7]:
+        st.subheader("Medical Analytics")
+        conn = sqlite3.connect(str(DB_PATH))
+        # Feedback summary
+        df_feedback = pd.read_sql_query("SELECT rating, COUNT(*) as count FROM medical_feedback GROUP BY rating", conn)
+        if not df_feedback.empty:
+            st.bar_chart(df_feedback.set_index('rating'))
+        else:
+            st.info("No medical feedback yet.")
+        # Recent feedback
+        df_recent = pd.read_sql_query("SELECT user_id, query, rating, comment, timestamp FROM medical_feedback ORDER BY timestamp DESC LIMIT 20", conn)
+        st.dataframe(df_recent)
+        conn.close()
+
     # Auto-refresh logic
     if st.session_state.auto_refresh:
         time.sleep(10)
@@ -1323,7 +1368,7 @@ if st.session_state.admin_mode:
     st.stop()
 
 else:
-    # -------------------- Chat Interface (enhanced with dynamic web scraping) --------------------
+    # -------------------- Chat Interface --------------------
     for msg in st.session_state.messages:
         with st.chat_message(msg["role"]):
             st.markdown(msg["content"])
@@ -1348,7 +1393,7 @@ else:
         if uploaded_file:
             import tempfile
             with tempfile.NamedTemporaryFile(delete=False, suffix=Path(uploaded_file.name).suffix) as tmp:
-                tmp.write(uploaded_file.getvalue())
+                tmp.write(uploaded_file.getbuffer())
                 uploaded = tmp.name
 
         lang_info = detect_language(prompt)
@@ -1369,7 +1414,7 @@ else:
                 if uploaded:
                     extra["image_url"] = uploaded
 
-                # Check if the user wants to scrape a website (simple heuristic: contains a URL and keywords)
+                # Web scrape detection (unchanged)
                 import re
                 url_match = re.search(r'(https?://[^\s]+)', prompt)
                 if url_match and ("scrape" in prompt.lower() or "get content" in prompt.lower() or "fetch" in prompt.lower()):
@@ -1378,7 +1423,6 @@ else:
                     with st.spinner(f"Scraping {url}..."):
                         scraped_text = scrape_url(url, use_js)
                     if scraped_text:
-                        # Truncate if too long
                         if len(scraped_text) > 2000:
                             scraped_text = scraped_text[:2000] + "... (truncated)"
                         answer = f"Here's the content I scraped from {url}:\n\n{scraped_text}"
@@ -1394,6 +1438,19 @@ else:
                     else:
                         hist = [{"role": m["role"], "content": m["content"]} for m in st.session_state.messages[-10:]]
                         result = think(prompt, hist, model_key, language=st.session_state.conversation_language)
+                elif model_key == "Yukti‑Doctor":
+                    if not MEDICAL_AVAILABLE:
+                        ans = "Medical module not available."
+                        placeholder.markdown(ans)
+                        result = {"type": "sync", "answer": ans}
+                    else:
+                        hist = [{"role": m["role"], "content": m["content"]} for m in st.session_state.messages[-10:]]
+                        result = think_medical(
+                            user_query=prompt,
+                            conversation_history=hist,
+                            uploaded_file=uploaded,
+                            model_key=model_key
+                        )
                 else:
                     model = load_model(model_key)
                     if model_key == "Yukti‑Audio":
@@ -1426,7 +1483,6 @@ else:
                             st.markdown(result["monologue"])
                     placeholder.markdown(ans)
 
-                    # Display sources if any
                     if result.get("sources"):
                         with st.expander("📚 Sources"):
                             for source in result["sources"]:

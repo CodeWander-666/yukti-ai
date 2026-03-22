@@ -237,6 +237,26 @@ def retrieve_and_rerank(
         return docs[:k]
 
 # ----------------------------------------------------------------------
+# Medical vector store loader (ADDED FOR YUKTI-DOCTOR)
+# ----------------------------------------------------------------------
+def load_medical_vectorstore() -> Optional[FAISS]:
+    """Load the medical FAISS index from disk."""
+    from config import MEDICAL_VECTORDB_PATH
+    if not MEDICAL_VECTORDB_PATH.exists():
+        logger.warning("Medical FAISS index not found.")
+        return None
+    try:
+        embeddings = get_embeddings()
+        return FAISS.load_local(
+            str(MEDICAL_VECTORDB_PATH),
+            embeddings,
+            allow_dangerous_deserialization=True
+        )
+    except Exception as e:
+        logger.exception("Failed to load medical vector store")
+        return None
+
+# ----------------------------------------------------------------------
 # Exports
 # ----------------------------------------------------------------------
 __all__ = [
@@ -248,4 +268,5 @@ __all__ = [
     "get_kb_detailed_status",
     "retrieve_and_rerank",
     "get_embeddings",
+    "load_medical_vectorstore",  # ADDED
 ]

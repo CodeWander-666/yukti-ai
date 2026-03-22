@@ -25,8 +25,12 @@ from config import (
     MODEL_CONCURRENCY,
     TASK_POLL_INTERVAL,
     DB_PATH,
-    MEDICAL_VECTORDB_PATH,  # used to check availability
 )
+
+# Hardcoded medical paths – these are relative to the project root
+PROJECT_ROOT = Path(__file__).parent.parent.absolute()
+MEDICAL_DATASET_PATH = PROJECT_ROOT / "dataset" / "medical"
+MEDICAL_VECTORDB_PATH = PROJECT_ROOT / "medical_faiss_index"
 
 # Import language utilities
 try:
@@ -109,8 +113,7 @@ _MODEL_REGISTRY = {
         "concurrency_limit": MODEL_CONCURRENCY.get("gemini", 60),
         "description": "Google Gemini (dynamic selection)"
     },
-    # Added for Yukti‑Doctor – this model is not actually used directly;
-    # it's a placeholder to make the service appear in the UI.
+    # Yukti‑Doctor uses a placeholder model – actual logic is in medical.py
     "medical-llama-3-70b": {
         "model_id": "medical-llama-3-70b",
         "provider": "local",
@@ -756,8 +759,8 @@ def get_available_models() -> List[str]:
                 except ImportError:
                     pass
         elif service == "Yukti‑Doctor":
-            # Yukti‑Doctor is available if the medical index exists (or we can always show it)
-            if MEDICAL_VECTORDB_PATH.exists():
+            # Show Yukti‑Doctor if the medical dataset folder exists
+            if MEDICAL_DATASET_PATH.exists():
                 available.append(service)
     return available
 

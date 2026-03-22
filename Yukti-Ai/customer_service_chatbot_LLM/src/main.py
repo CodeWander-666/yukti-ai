@@ -1,8 +1,8 @@
 """
 Main Streamlit application for Yukti AI.
-Includes hardcoded admin credentials (admin1234/admin1234) and a full admin dashboard.
-Knowledge base updates automatically in the background (manual update button removed).
-Now supports on‑demand web scraping for user queries.
+Fully hardcoded with all paths defined inside.
+Includes auto‑updater that monitors all CSVs in dataset/ (excluding medical/),
+background medical index builder, and hardcoded admin credentials.
 """
 
 import os
@@ -13,7 +13,7 @@ import sqlite3
 import threading
 import json
 from pathlib import Path
-from datetime import datetime, timedelta
+from datetime import datetime
 from typing import Dict, Any, Optional, List, Tuple
 
 import streamlit as st
@@ -23,61 +23,53 @@ import plotly.graph_objects as go
 import bcrypt
 import requests
 
-# Add project root to path
+# ----------------------------------------------------------------------
+# Hardcoded paths (all relative to this file)
+# ----------------------------------------------------------------------
 PROJECT_ROOT = Path(__file__).parent.parent.absolute()
-if str(PROJECT_ROOT) not in sys.path:
-    sys.path.insert(0, str(PROJECT_ROOT))
+DATASET_DIR = PROJECT_ROOT / "dataset"
+UPLOADS_PATH = PROJECT_ROOT / "data" / "uploads"
+VECTORDB_PATH = PROJECT_ROOT / "faiss_index"
+DB_PATH = PROJECT_ROOT / "yukti_tasks.db"
+SOURCES_FILE = PROJECT_ROOT / "knowledge_updater" / "sources.json"
+WEBSITES_FILE = PROJECT_ROOT / "knowledge_updater" / "web_sources.json"
+MEDICAL_DATASET_PATH = DATASET_DIR / "medical"
+MEDICAL_VECTORDB_PATH = PROJECT_ROOT / "medical_faiss_index"
 
-# Local imports
-try:
-    from config import (
-        BASE_DIR,
-        VECTORDB_PATH,
-        DB_PATH,
-        RETRIEVAL_CACHE_TTL,
-        TASK_POLL_INTERVAL,
-        ZHIPU_API_KEY,
-        GOOGLE_API_KEY,
-    )
-except ImportError:
-    BASE_DIR = PROJECT_ROOT
-    VECTORDB_PATH = BASE_DIR / "faiss_index"
-    DB_PATH = BASE_DIR / "yukti_tasks.db"
-    RETRIEVAL_CACHE_TTL = 3600
-    TASK_POLL_INTERVAL = 5
-    ZHIPU_API_KEY = os.getenv("ZHIPU_API_KEY", "")
-    GOOGLE_API_KEY = os.getenv("GOOGLE_API_KEY", "")
-
-# Define UPLOADS_PATH globally
-UPLOADS_PATH = BASE_DIR / "data" / "uploads"
+# Ensure directories exist
 UPLOADS_PATH.mkdir(parents=True, exist_ok=True)
+DATASET_DIR.mkdir(parents=True, exist_ok=True)
 
-# Paths for source JSON files
-SOURCES_FILE = BASE_DIR / "knowledge_updater" / "sources.json"
-WEBSITES_FILE = BASE_DIR / "knowledge_updater" / "web_sources.json"
+# ----------------------------------------------------------------------
+# API keys (from environment)
+# ----------------------------------------------------------------------
+ZHIPU_API_KEY = os.getenv("ZHIPU_API_KEY", "")
+GOOGLE_API_KEY = os.getenv("GOOGLE_API_KEY", "")
+
+# ----------------------------------------------------------------------
+# Import local modules (with fallbacks)
+# ----------------------------------------------------------------------
+# Add src to path so we can import our modules
+sys.path.insert(0, str(PROJECT_ROOT))
 
 try:
-    from langchain_helper import (
-        create_vector_db,
+    from src.langchain_helper import (
         get_kb_detailed_status,
         get_document_count,
         check_kb_status,
-        load_medical_vectorstore,
     )
 except ImportError:
-    def create_vector_db(): return False
     def get_kb_detailed_status(): return {"ready": False, "error": "Not implemented"}
     def get_document_count(): return None
     def check_kb_status(): return False
-    def load_medical_vectorstore(): return None
 
 try:
-    from think import think
+    from src.think import think
 except ImportError:
     def think(*args, **kwargs): return {"type": "sync", "answer": "Think module not available"}
 
 try:
-    from model_manager import (
+    from src.model_manager import (
         get_available_models,
         MODELS,
         get_active_tasks,
@@ -96,13 +88,12 @@ except ImportError:
     def load_model(*args): return None
 
 try:
-    from language_detector import detect_language
+    from src.language_detector import detect_language
 except ImportError:
     def detect_language(text): return {"language": "en", "method": "fallback", "explicit_instruction": None}
 
-# Import UI helpers
 try:
-    from ui_helpers import render_task, show_error_toast, show_success_toast, confirm_dialog, metric_card, log_viewer
+    from src.ui_helpers import render_task, show_error_toast, show_success_toast, confirm_dialog, metric_card, log_viewer
 except ImportError:
     def render_task(*args): pass
     def show_error_toast(msg): st.error(msg)
@@ -111,26 +102,26 @@ except ImportError:
     def metric_card(label, value, delta=None): st.metric(label, value, delta)
     def log_viewer(path, max_lines): st.info("Log viewer not available")
 
-# Import knowledge updater components
 try:
-    from knowledge_updater.builder import rebuild_index
-    from knowledge_updater.connectors import scrape_url
+    from src.knowledge_updater.builder import rebuild_index
+    from src.knowledge_updater.connectors import scrape_url
     KB_UPDATER_AVAILABLE = True
 except ImportError:
     KB_UPDATER_AVAILABLE = False
     def rebuild_index(): return False
     def scrape_url(url, use_js=False): return None
 
-# Import medical module for Yukti‑Doctor
 try:
-    from medical import think_medical
+    from src.medical import think_medical
     MEDICAL_AVAILABLE = True
 except ImportError:
     MEDICAL_AVAILABLE = False
     def think_medical(*args, **kwargs):
         return {"type": "sync", "answer": "Medical module not available."}
 
+# ----------------------------------------------------------------------
 # Configure logging
+# ----------------------------------------------------------------------
 logging.basicConfig(level=logging.INFO, format='%(asctime)s - %(name)s - %(levelname)s - %(message)s')
 logger = logging.getLogger(__name__)
 
@@ -140,10 +131,9 @@ logger = logging.getLogger(__name__)
 st.set_page_config(page_title="Yukti AI", page_icon="🚀", layout="wide", initial_sidebar_state="expanded")
 
 # ----------------------------------------------------------------------
-# Database initialization (ensure tasks table has user_id)
+# Database initialization
 # ----------------------------------------------------------------------
 def init_db():
-    """Create all tables if they don't exist."""
     try:
         conn = sqlite3.connect(str(DB_PATH))
         c = conn.cursor()
@@ -216,7 +206,6 @@ def init_db():
             user_id INTEGER
         )''')
 
-        # medical_feedback table for Yukti‑Doctor
         c.execute('''CREATE TABLE IF NOT EXISTS medical_feedback (
             id INTEGER PRIMARY KEY AUTOINCREMENT,
             user_id INTEGER,
@@ -272,7 +261,7 @@ def ensure_admin_user():
 ensure_admin_user()
 
 # ----------------------------------------------------------------------
-# Authentication helpers (unchanged)
+# Authentication helpers
 # ----------------------------------------------------------------------
 def authenticate(username: str, password: str) -> Tuple[bool, Optional[int], bool]:
     try:
@@ -333,7 +322,7 @@ def log_admin_action(admin_id: int, action: str, details: str = ""):
         logger.error(f"Failed to log admin action: {e}")
 
 # ----------------------------------------------------------------------
-# System metrics (unchanged)
+# System metrics
 # ----------------------------------------------------------------------
 try:
     import psutil
@@ -383,7 +372,7 @@ def record_kb_metrics():
         logger.error(f"Failed to record KB metrics: {e}")
 
 # ----------------------------------------------------------------------
-# Enhanced admin data functions
+# Admin data functions (simplified)
 # ----------------------------------------------------------------------
 def get_all_users():
     try:
@@ -396,7 +385,6 @@ def get_all_users():
         return pd.DataFrame(columns=["id", "username", "is_admin", "created_at"])
 
 def get_user_message_counts():
-    """Return user stats including message counts and media generation counts."""
     try:
         conn = sqlite3.connect(str(DB_PATH))
         query = """
@@ -429,15 +417,12 @@ def get_user_message_counts():
         """
         df = pd.read_sql_query(query, conn)
         conn.close()
-
         if not df.empty:
             numeric_cols = ['total_messages', 'successful', 'failed', 'avg_response_time',
                             'images_created', 'videos_created', 'audio_created']
             for col in numeric_cols:
                 df[col] = pd.to_numeric(df[col], errors='coerce').fillna(0)
-
             df['success_rate'] = (df['successful'] / df['total_messages'].replace(0, 1)) * 100
-
             df['created_at'] = pd.to_datetime(df['created_at']).dt.strftime('%Y-%m-%d %H:%M')
             df['last_active'] = pd.to_datetime(df['last_active']).dt.strftime('%Y-%m-%d %H:%M')
             df['avg_response_time'] = df['avg_response_time'].round(0).astype(int)
@@ -452,7 +437,7 @@ def get_user_message_counts():
     except Exception as e:
         logger.exception("get_user_message_counts failed")
         if st.session_state.get('debug_mode', False):
-            st.error(f"🔴 Error in get_user_message_counts: {e}")
+            st.error(f"Error in get_user_message_counts: {e}")
         return pd.DataFrame(columns=[
             'id', 'username', 'is_admin', 'created_at', 'total_messages',
             'successful', 'failed', 'avg_response_time', 'last_active',
@@ -626,10 +611,9 @@ def get_database_stats():
     return stats
 
 # ----------------------------------------------------------------------
-# Web scraping configuration management (updated to use files)
+# Web scraping configuration management
 # ----------------------------------------------------------------------
 def load_web_sources():
-    """Load web scraping sources from web_sources.json."""
     if WEBSITES_FILE.exists():
         try:
             with open(WEBSITES_FILE, 'r') as f:
@@ -639,19 +623,17 @@ def load_web_sources():
     return {"websites": []}
 
 def save_web_sources(sources):
-    """Save web scraping sources to web_sources.json."""
     try:
         WEBSITES_FILE.parent.mkdir(parents=True, exist_ok=True)
         with open(WEBSITES_FILE, 'w') as f:
             json.dump(sources, f, indent=2)
-        logger.info("Web sources saved to web_sources.json")
+        logger.info("Web sources saved")
         return True
     except Exception as e:
         logger.error(f"Failed to save web sources: {e}")
         return False
 
 def load_rss_api_sources():
-    """Load RSS/API sources from sources.json."""
     if SOURCES_FILE.exists():
         try:
             with open(SOURCES_FILE, 'r') as f:
@@ -661,27 +643,25 @@ def load_rss_api_sources():
     return {"rss": [], "api": []}
 
 def save_rss_api_sources(sources):
-    """Save RSS/API sources to sources.json."""
     try:
         SOURCES_FILE.parent.mkdir(parents=True, exist_ok=True)
         with open(SOURCES_FILE, 'w') as f:
             json.dump(sources, f, indent=2)
-        logger.info("RSS/API sources saved to sources.json")
+        logger.info("RSS/API sources saved")
         return True
     except Exception as e:
         logger.error(f"Failed to save sources: {e}")
         return False
 
 # ----------------------------------------------------------------------
-# Background knowledge base updater thread (MODIFIED: monitors all CSVs)
+# Background knowledge base updater (monitors all CSVs)
 # ----------------------------------------------------------------------
 class KnowledgeBaseUpdater(threading.Thread):
-    """Background thread that checks for changes and rebuilds index if needed."""
     def __init__(self, check_interval=2):
         super().__init__(daemon=True)
         self.check_interval = check_interval
         self.last_rebuild_time = 0
-        self.last_known_mtimes = {}  # file -> mtime
+        self.last_known_mtimes = {}
         self.running = True
 
     def run(self):
@@ -694,10 +674,9 @@ class KnowledgeBaseUpdater(threading.Thread):
             time.sleep(self.check_interval)
 
     def _check_and_rebuild(self):
-        """Check all CSV files in dataset/ (excluding medical) for changes."""
-        dataset_dir = PROJECT_ROOT / "dataset"
-        if dataset_dir.exists():
-            for csv_file in dataset_dir.glob("**/*.csv"):
+        # Check all CSV files in dataset folder (excluding medical)
+        if DATASET_DIR.exists():
+            for csv_file in DATASET_DIR.glob("**/*.csv"):
                 if "medical" in csv_file.parts:
                     continue
                 if csv_file.is_file():
@@ -719,7 +698,7 @@ class KnowledgeBaseUpdater(threading.Thread):
                         self.last_known_mtimes[file_path] = mtime
                         return
 
-        # Also check sources.json and web_sources.json for changes
+        # Check sources.json and web_sources.json
         for config_file in [SOURCES_FILE, WEBSITES_FILE]:
             if config_file.exists():
                 mtime = config_file.stat().st_mtime
@@ -730,19 +709,16 @@ class KnowledgeBaseUpdater(threading.Thread):
                     return
 
     def _trigger_rebuild(self):
-        """Rebuild index if at least 60 seconds passed since last rebuild."""
         now = time.time()
         if now - self.last_rebuild_time < 60:
             logger.info("Skipping rebuild – last rebuild too recent.")
             return
         logger.info("Auto-rebuilding knowledge base...")
         success = rebuild_index()
-        self.last_rebuild_time = now  # always update to prevent rapid retries
+        self.last_rebuild_time = now
         if success:
-            # Update session state status
             if 'kb_status' in st.session_state:
                 st.session_state.kb_status = get_kb_detailed_status()
-            # Record metrics
             record_kb_metrics()
             logger.info("Auto-rebuild completed.")
         else:
@@ -755,6 +731,28 @@ class KnowledgeBaseUpdater(threading.Thread):
 if 'kb_updater' not in st.session_state:
     st.session_state.kb_updater = KnowledgeBaseUpdater(check_interval=2)
     st.session_state.kb_updater.start()
+
+# ----------------------------------------------------------------------
+# Background medical index builder (if dataset exists but index missing)
+# ----------------------------------------------------------------------
+def build_medical_if_needed():
+    if not MEDICAL_DATASET_PATH.exists():
+        return
+    if MEDICAL_VECTORDB_PATH.exists():
+        return
+    logger.info("Medical dataset present but index missing. Building in background...")
+    try:
+        # Import here to avoid circular import
+        from src.knowledge_updater.build_medical_index import build_medical_index
+        build_medical_index()
+        logger.info("Medical index built successfully.")
+    except Exception as e:
+        logger.exception("Failed to build medical index in background.")
+
+# Start thread only if not already started
+if not hasattr(st.session_state, 'medical_build_started'):
+    st.session_state.medical_build_started = True
+    threading.Thread(target=build_medical_if_needed, daemon=True).start()
 
 # ----------------------------------------------------------------------
 # Session state initialization
@@ -775,13 +773,11 @@ if "logged_in" not in st.session_state:
     st.session_state.last_metrics_record = 0
     st.session_state.debug_mode = False
     st.session_state.auto_refresh = False
-    # Load web sources
     st.session_state.web_sources = load_web_sources()
-    # Load RSS/API sources
     st.session_state.rss_api_sources = load_rss_api_sources()
 
 # ----------------------------------------------------------------------
-# Login / Signup UI (unchanged)
+# Login / Signup UI
 # ----------------------------------------------------------------------
 if not st.session_state.logged_in:
     st.title("Yukti AI")
@@ -827,7 +823,6 @@ if not st.session_state.logged_in:
 with st.sidebar:
     st.markdown(f"### 👤 {st.session_state.username}")
     if st.button("🚪 Logout", use_container_width=True):
-        # Stop background updater before logout
         if 'kb_updater' in st.session_state:
             st.session_state.kb_updater.stop()
         for key in list(st.session_state.keys()):
@@ -858,7 +853,6 @@ with st.sidebar:
     selected_model = model_options[display_names.index(selected_display)]
     st.session_state.selected_model = selected_model
 
-    # File upload block
     uploaded_file = None
     if selected_model in ["Yukti‑Video", "Yukti‑Image", "Yukti‑Audio", "Yukti‑Doctor"]:
         st.markdown("### 📎 Attach File")
@@ -909,18 +903,15 @@ with st.sidebar:
 # Admin dashboard or chat
 # ----------------------------------------------------------------------
 if st.session_state.admin_mode:
-    # -------------------- Admin Dashboard --------------------
     st.title("🛡️ Admin Dashboard")
     st.caption(f"Logged in as {st.session_state.username} (Admin)")
 
-    # Record metrics periodically
     now = time.time()
     if now - st.session_state.last_metrics_record > 60:
         record_system_metrics()
         record_kb_metrics()
         st.session_state.last_metrics_record = now
 
-    # Database diagnostics
     with st.expander("🔍 Database Diagnostics", expanded=False):
         stats = get_database_stats()
         cols = st.columns(5)
@@ -930,7 +921,6 @@ if st.session_state.admin_mode:
         cols[3].metric("System Metrics", stats.get("system_metrics", 0))
         cols[4].metric("KB Metrics", stats.get("kb_metrics", 0))
 
-    # Admin tabs
     tabs = st.tabs(["📊 Overview", "👥 Users", "📈 Analytics", "📚 Knowledge Base", "📋 Tasks", "🤖 Insights", "⚙️ System", "🩺 Medical"])
 
     # ----- Overview Tab -----
@@ -950,17 +940,15 @@ if st.session_state.admin_mode:
             else:
                 st.metric("Last KB Update", "Never")
 
-        # Live system metrics
         sys_metrics = get_system_metrics()
         cols = st.columns(3)
         cols[0].metric("CPU", f"{sys_metrics['cpu']:.1f}%")
         cols[1].metric("Memory", f"{sys_metrics['memory']:.1f}%")
         cols[2].metric("Disk", f"{sys_metrics['disk']:.1f}%")
 
-    # ----- Users Tab (unchanged) -----
+    # ----- Users Tab -----
     with tabs[1]:
         st.subheader("User Management")
-
         with st.expander("➕ Add New User", expanded=False):
             with st.form("add_user_form"):
                 col1, col2 = st.columns(2)
@@ -987,7 +975,7 @@ if st.session_state.admin_mode:
 
         users_df = get_user_message_counts()
         if users_df.empty:
-            st.info("👥 No users found. Create one using the form above.")
+            st.info("👥 No users found.")
         else:
             available_cols = users_df.columns.tolist()
             display_columns = ['username', 'is_admin', 'created_at', 'total_messages']
@@ -1014,11 +1002,11 @@ if st.session_state.admin_mode:
                 'audio_created': 'Audio'
             }
             display_df = display_df.rename(columns={k: v for k, v in rename_map.items() if k in display_df.columns})
-            st.dataframe(display_df, width='stretch')
+            st.dataframe(display_df, use_container_width=True)
 
             if st.session_state.debug_mode:
                 with st.expander("🔍 Raw User Data (Debug)"):
-                    st.dataframe(users_df, width='stretch')
+                    st.dataframe(users_df, use_container_width=True)
 
             st.markdown("### ✏️ Edit / Delete Users")
             for _, row in users_df.iterrows():
@@ -1049,7 +1037,7 @@ if st.session_state.admin_mode:
                             else:
                                 st.error(msg)
 
-    # ----- Analytics Tab (unchanged) -----
+    # ----- Analytics Tab -----
     with tabs[2]:
         st.subheader("Essential Performance Metrics")
         conn = sqlite3.connect(str(DB_PATH))
@@ -1057,14 +1045,13 @@ if st.session_state.admin_mode:
         total_errors = pd.read_sql_query("SELECT COUNT(*) as cnt FROM user_activity WHERE success=0", conn)['cnt'][0]
         avg_latency = pd.read_sql_query("SELECT AVG(response_time_ms) as avg FROM user_activity", conn)['avg'][0] or 0
         resolution_rate = ((total_queries - total_errors) / total_queries * 100) if total_queries > 0 else 0
-        fallback_rate = (total_errors / total_queries * 100) if total_queries > 0 else 0
         conn.close()
 
         col1, col2, col3, col4 = st.columns(4)
         col1.metric("Avg Latency (ms)", f"{avg_latency:.0f}")
         col2.metric("Resolution Rate", f"{resolution_rate:.1f}%")
-        col3.metric("Fallback Rate", f"{fallback_rate:.1f}%")
-        col4.metric("Task Completion (Video)", "N/A")
+        col3.metric("Fallback Rate", f"{100-resolution_rate:.1f}%")
+        col4.metric("Task Completion", "N/A")
 
         st.subheader("Model Performance Over Time")
         perf = get_model_performance(30)
@@ -1106,7 +1093,7 @@ if st.session_state.admin_mode:
         fig6.update_layout(polar=dict(radialaxis=dict(visible=True, range=[0,100])))
         st.plotly_chart(fig6, use_container_width=True)
 
-    # ----- Knowledge Base Tab (with Web Scraping) -----
+    # ----- Knowledge Base Tab -----
     with tabs[3]:
         st.subheader("Knowledge Base Management")
         col1, col2 = st.columns(2)
@@ -1121,17 +1108,17 @@ if st.session_state.admin_mode:
 
         kb_hist = get_kb_history(30)
         if kb_hist.empty:
-            st.info("📚 No knowledge base history yet. It will appear after the first rebuild.")
+            st.info("📚 No knowledge base history yet.")
         else:
             if 'time' in kb_hist.columns and 'doc_count' in kb_hist.columns:
                 fig = px.line(kb_hist, x="time", y="doc_count", title="Document Count Over Time")
                 st.plotly_chart(fig, use_container_width=True)
 
         st.markdown("### ⚙️ Auto‑Update Status")
-        st.success("✅ Auto‑update is running in background (checks every 2 seconds, rebuilds if changes detected).")
+        st.success("✅ Auto‑update is running in background (checks every 2 seconds).")
 
         with st.expander("📤 Upload Files", expanded=False):
-            st.markdown("Upload CSV, TXT, or PDF files to add to the knowledge base. Changes will be picked up automatically.")
+            st.markdown("Upload CSV, TXT, or PDF files to add to the knowledge base.")
             uploaded_files = st.file_uploader(
                 "Choose files",
                 type=["csv", "txt", "pdf"],
@@ -1148,8 +1135,6 @@ if st.session_state.admin_mode:
 
         with st.expander("🌐 RSS & API", expanded=False):
             st.markdown("Configure RSS feeds and APIs.")
-            if "rss_api_sources" not in st.session_state:
-                st.session_state.rss_api_sources = load_rss_api_sources()
             config = st.session_state.rss_api_sources
 
             st.subheader("RSS Feeds")
@@ -1188,12 +1173,10 @@ if st.session_state.admin_mode:
                 if save_rss_api_sources(config):
                     st.success("Sources saved! They will be used in the next knowledge base rebuild.")
                 else:
-                    st.error("Failed to save sources. Check logs.")
+                    st.error("Failed to save sources.")
 
         with st.expander("🕷️ Website Crawling", expanded=False):
-            st.markdown("Configure websites to crawl entirely. The system will discover and index all pages from these sites.")
-            st.caption("Enable/disable each source with the checkbox. Click 'Save Web Sources' to persist changes.")
-
+            st.markdown("Configure websites to crawl entirely.")
             web_sources = st.session_state.web_sources
             websites = web_sources.get("websites", [])
 
@@ -1226,11 +1209,11 @@ if st.session_state.admin_mode:
                 web_sources["websites"] = websites
                 if save_web_sources(web_sources):
                     st.session_state.web_sources = web_sources
-                    st.success("Web sources saved! They will be used in the next knowledge base rebuild.")
+                    st.success("Web sources saved!")
                 else:
-                    st.error("Failed to save web sources. Check logs.")
+                    st.error("Failed to save web sources.")
 
-    # ----- Tasks Tab (unchanged) -----
+    # ----- Tasks Tab -----
     with tabs[4]:
         st.subheader("Active Tasks")
         active = get_active_tasks(st.session_state.user_id)
@@ -1251,9 +1234,9 @@ if st.session_state.admin_mode:
         if hist.empty:
             st.info("📋 No task history yet.")
         else:
-            st.dataframe(hist, width='stretch')
+            st.dataframe(hist, use_container_width=True)
 
-    # ----- Insights Tab (unchanged) -----
+    # ----- Insights Tab -----
     with tabs[5]:
         st.subheader("AI‑Powered Insights")
         conn = sqlite3.connect(str(DB_PATH))
@@ -1329,7 +1312,7 @@ if st.session_state.admin_mode:
         else:
             st.info("Insufficient data for forecast.")
 
-    # ----- System Tab (unchanged) -----
+    # ----- System Tab -----
     with tabs[6]:
         st.subheader("System Control")
         if st.button("📥 Export Analytics"):
@@ -1349,18 +1332,15 @@ if st.session_state.admin_mode:
     with tabs[7]:
         st.subheader("Medical Analytics")
         conn = sqlite3.connect(str(DB_PATH))
-        # Feedback summary
         df_feedback = pd.read_sql_query("SELECT rating, COUNT(*) as count FROM medical_feedback GROUP BY rating", conn)
         if not df_feedback.empty:
             st.bar_chart(df_feedback.set_index('rating'))
         else:
             st.info("No medical feedback yet.")
-        # Recent feedback
         df_recent = pd.read_sql_query("SELECT user_id, query, rating, comment, timestamp FROM medical_feedback ORDER BY timestamp DESC LIMIT 20", conn)
         st.dataframe(df_recent)
         conn.close()
 
-    # Auto-refresh logic
     if st.session_state.auto_refresh:
         time.sleep(10)
         st.rerun()
@@ -1414,7 +1394,7 @@ else:
                 if uploaded:
                     extra["image_url"] = uploaded
 
-                # Web scrape detection (unchanged)
+                # Web scrape detection
                 import re
                 url_match = re.search(r'(https?://[^\s]+)', prompt)
                 if url_match and ("scrape" in prompt.lower() or "get content" in prompt.lower() or "fetch" in prompt.lower()):

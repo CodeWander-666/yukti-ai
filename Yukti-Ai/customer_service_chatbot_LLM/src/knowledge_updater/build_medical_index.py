@@ -11,14 +11,18 @@ from pathlib import Path
 BASE_DIR = Path(__file__).parent.parent.parent.absolute()
 sys.path.insert(0, str(BASE_DIR))
 
-from src.config import MEDICAL_DATASET_PATH, MEDICAL_VECTORDB_PATH
-from src.embeddings import get_embeddings
+# Now we can import medical_loader and get_embeddings
 from src.knowledge_updater.medical_loader import load_medquad
+from src.embeddings import get_embeddings
 from langchain_community.vectorstores import FAISS
 import logging
 
 logging.basicConfig(level=logging.INFO)
 logger = logging.getLogger(__name__)
+
+# Define paths relative to project root
+MEDICAL_DATASET_PATH = BASE_DIR / "dataset" / "medical"
+MEDICAL_VECTORDB_PATH = BASE_DIR / "medical_faiss_index"
 
 def build_medical_index():
     """Load medical documents and build FAISS index."""
